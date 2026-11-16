@@ -1,0 +1,764 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>트윗 영상 다운로드 · WebP 변환기</title>
+<link rel="manifest" href="manifest.webmanifest">
+<meta name="theme-color" content="#0f1115">
+<link rel="icon" type="image/png" href="icon-192.png">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<style>
+  :root{
+    --bg:#0f1115; --card:#191c23; --line:#2a2f3a; --text:#e9ecf2; --sub:#9aa3b2;
+    --accent:#4f8cff; --accent2:#2f6be0; --ok:#3ecf8e; --warn:#ffb547; --err:#ff6b6b;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;background:var(--bg);color:var(--text);
+    font-family:system-ui,-apple-system,"Noto Sans KR","Apple SD Gothic Neo",sans-serif;font-size:15px;line-height:1.45}
+  main{max-width:640px;margin:0 auto;padding:14px 14px 40px}
+  h1{font-size:19px;margin:4px 2px 12px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px;margin-bottom:12px}
+  .card h2{font-size:15px;margin:0 0 10px;color:var(--sub);font-weight:600}
+  .pick{display:flex;align-items:center;justify-content:center;gap:8px;width:100%;padding:16px;border:2px dashed var(--line);
+    border-radius:12px;color:var(--text);font-size:16px;cursor:pointer;background:transparent}
+  .pick:active{background:#1f2430}
+  .pickwrap{position:relative;overflow:hidden;border-radius:12px}
+  .pickwrap input[type=file]{position:absolute;inset:0;width:100%;height:100%;opacity:0;cursor:pointer;font-size:100px;z-index:2}
+  video{width:100%;max-height:52vh;background:#000;border-radius:10px;display:block}
+  .row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+  .between{justify-content:space-between}
+  .btn{appearance:none;border:1px solid var(--line);background:#232835;color:var(--text);border-radius:10px;
+    padding:10px 12px;font-size:14px;cursor:pointer;touch-action:manipulation}
+  .btn:active{background:#2c3344}
+  .btn.primary{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:700;font-size:16px;padding:14px;width:100%}
+  .btn.primary:active{background:var(--accent2)}
+  .btn.small{padding:8px 10px;font-size:13px}
+  .btn:disabled{opacity:.45}
+  .grow{flex:1}
+  .timebox{font-variant-numeric:tabular-nums;font-weight:700;font-size:16px}
+  .label{color:var(--sub);font-size:13px}
+  input[type=range]{width:100%;accent-color:var(--accent);height:28px}
+  .track{position:relative;height:10px;background:#262b36;border-radius:6px;margin:10px 0 4px;overflow:hidden}
+  .sel{position:absolute;top:0;bottom:0;background:var(--accent);opacity:.75}
+  .head{position:absolute;top:-2px;bottom:-2px;width:2px;background:#fff}
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+  .field label{display:block;color:var(--sub);font-size:13px;margin-bottom:4px}
+  select{width:100%;padding:10px;border-radius:10px;border:1px solid var(--line);background:#232835;color:var(--text);font-size:14px}
+  .check{display:flex;align-items:center;gap:8px;padding:6px 0}
+  .check input{width:20px;height:20px;accent-color:var(--accent)}
+  .info{color:var(--sub);font-size:13px;margin-top:8px}
+  .warn{color:var(--warn)}
+  .err{color:var(--err)}
+  .bar{height:10px;background:#262b36;border-radius:6px;overflow:hidden;margin:8px 0}
+  .bar > div{height:100%;width:0;background:var(--ok);transition:width .15s}
+  .result img{max-width:100%;border-radius:10px;display:block;margin:0 auto 10px;background:
+    repeating-conic-gradient(#2a2f3a 0 25%, #20242d 0 50%) 0 0/16px 16px}
+  .hidden{display:none !important}
+  .num{width:96px;padding:8px 10px;border-radius:10px;border:1px solid var(--line);background:#232835;color:var(--text);
+    font-size:16px;font-weight:700;text-align:right;font-variant-numeric:tabular-nums}
+  .num:focus{outline:2px solid var(--accent);border-color:var(--accent)}
+  input[type=url],input[type=text]{width:100%;padding:12px;border-radius:10px;border:1px solid var(--line);background:#232835;color:var(--text);font-size:15px}
+  .vid{border-top:1px solid var(--line);padding-top:12px;margin-top:12px}
+  .vid img{width:100%;max-height:40vh;object-fit:contain;background:#000;border-radius:10px;display:block;margin-bottom:8px}
+  .q{display:flex;align-items:center;gap:6px;margin:6px 0;flex-wrap:wrap}
+  .q .ql{flex:1;min-width:110px;font-variant-numeric:tabular-nums}
+  a.link{color:var(--accent)}
+  .tweettext{color:var(--sub);font-size:13px;margin:6px 0 4px;white-space:pre-wrap;max-height:4.5em;overflow:hidden}
+  .toast{position:fixed;left:50%;bottom:20px;transform:translateX(-50%);background:#000c;color:#fff;padding:10px 14px;
+    border-radius:10px;font-size:14px;z-index:9;max-width:90vw;text-align:center}
+</style>
+</head>
+<body>
+<main>
+  <h1>🎞️ 트윗 영상 다운로드 · WebP 변환</h1>
+
+  <div id="unsupported" class="card hidden">
+    <p class="err" style="margin:0">이 브라우저는 WebP 저장(인코딩)을 지원하지 않습니다. 안드로이드 크롬이나 Claude 안드로이드 앱에서 열어 주세요.</p>
+  </div>
+
+  <!-- 0. 트위터 -->
+  <div class="card">
+    <h2>🐦 트위터(X) 링크로 영상 가져오기</h2>
+    <input id="tw" type="url" inputmode="url" placeholder="https://x.com/.../status/..." autocomplete="off">
+    <div class="row" style="margin-top:8px">
+      <button class="btn small" id="pasteBtn">📋 붙여넣기</button>
+      <button class="btn grow" id="twBtn" style="background:var(--accent);border-color:var(--accent);color:#fff;font-weight:700">가져오기</button>
+    </div>
+    <div id="twStatus" class="info"></div>
+    <div id="twList"></div>
+  </div>
+
+  <!-- 1. 파일 선택 -->
+  <div class="card">
+    <h2>📁 또는 폰에 있는 동영상</h2>
+    <div class="pickwrap">
+      <div class="pick">📁 동영상 선택</div>
+      <input id="file" type="file" accept="video/*,.mp4,.mov,.webm,.mkv,.3gp">
+    </div>
+    
+    <div id="fileInfo" class="info hidden"></div>
+  </div>
+
+  <!-- 2. 구간 편집 -->
+  <div id="editor" class="card hidden">
+    <h2>✂️ 구간 편집</h2>
+    <video id="video" playsinline muted preload="auto"></video>
+
+    <div class="track" id="track"><div class="sel" id="selBar"></div><div class="head" id="headBar"></div></div>
+    <div class="row between label"><span id="curTime">0.00초</span><span id="durTime">/ 0.00초</span></div>
+
+    <div class="row" style="margin-top:8px">
+      <button class="btn small" id="back1">−1초</button>
+      <button class="btn small" id="backF">−0.1</button>
+      <button class="btn grow" id="playBtn">▶ 재생</button>
+      <button class="btn small" id="fwdF">+0.1</button>
+      <button class="btn small" id="fwd1">+1초</button>
+    </div>
+
+    <div style="margin-top:14px">
+      <div class="row between"><span class="label">시작</span><span class="row" style="gap:6px"><input id="startNum" class="num" type="text" inputmode="decimal" enterkeyhint="done" value="0.00"><span class="label">초</span></span></div>
+      <input type="range" id="startR" min="0" max="1" step="0.01" value="0">
+      <div class="row">
+        <button class="btn small" id="sMinus">−0.1</button>
+        <button class="btn small" id="sPlus">+0.1</button>
+        <button class="btn small grow" id="setStart">📍 현재 위치를 시작으로</button>
+      </div>
+    </div>
+
+    <div style="margin-top:14px">
+      <div class="row between"><span class="label">끝</span><span class="row" style="gap:6px"><input id="endNum" class="num" type="text" inputmode="decimal" enterkeyhint="done" value="0.00"><span class="label">초</span></span></div>
+      <input type="range" id="endR" min="0" max="1" step="0.01" value="1">
+      <div class="row">
+        <button class="btn small" id="eMinus">−0.1</button>
+        <button class="btn small" id="ePlus">+0.1</button>
+        <button class="btn small grow" id="setEnd">📍 현재 위치를 끝으로</button>
+      </div>
+    </div>
+
+    <div class="row" style="margin-top:12px">
+      <button class="btn grow" id="loopBtn">🔁 선택 구간 반복 재생</button>
+    </div>
+    <div class="info">선택 구간 길이: <b id="lenTxt">0.00초</b></div>
+  </div>
+
+  <!-- 3. 설정 -->
+  <div id="settings" class="card hidden">
+    <h2>⚙️ 변환 설정</h2>
+    <div class="grid">
+      <div class="field">
+        <label>초당 프레임 (FPS)</label>
+        <select id="fps">
+          <option value="0" selected>원본 (자동)</option>
+          <option>5</option><option>8</option><option>10</option><option>12</option>
+          <option>15</option><option>20</option><option>24</option><option>30</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>가로 크기</label>
+        <select id="width">
+          <option value="0">원본</option><option value="1080">1080px</option><option value="720">720px</option>
+          <option value="540">540px</option><option value="480" selected>480px</option><option value="360">360px</option>
+          <option value="320">320px</option><option value="240">240px</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>화질</label>
+        <select id="quality">
+          <option value="0.5">낮음 (용량↓)</option><option value="0.7">보통</option>
+          <option value="0.8" selected>좋음</option><option value="0.92">매우 좋음</option>
+          <option value="1">최고</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>재생 속도</label>
+        <select id="speed">
+          <option value="0.5">0.5배 (느리게)</option><option value="0.75">0.75배</option>
+          <option value="1" selected>1배</option><option value="1.5">1.5배</option>
+          <option value="2">2배</option><option value="3">3배</option>
+        </select>
+      </div>
+    </div>
+    <label class="check"><input type="checkbox" id="loop" checked> 무한 반복 재생</label>
+    <label class="check"><input type="checkbox" id="boomerang"> 부메랑 (앞으로 → 뒤로 왕복)</label>
+    <div class="info" id="estimate"></div>
+
+    <div style="margin-top:12px">
+      <button class="btn primary" id="convertBtn">WebP로 변환하기</button>
+    </div>
+    <div id="progressWrap" class="hidden">
+      <div class="bar"><div id="bar"></div></div>
+      <div class="row between">
+        <span class="label" id="progTxt">준비 중…</span>
+        <button class="btn small" id="cancelBtn">취소</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 4. 결과 -->
+  <div id="result" class="card result hidden">
+    <h2>✅ 결과</h2>
+    <img id="outImg" alt="변환된 WebP">
+    <div class="info" id="outInfo" style="text-align:center;margin-bottom:10px"></div>
+    <button class="btn primary" id="saveBtn">💾 WebP 저장</button>
+    <div class="info" id="saveHint"></div>
+  </div>
+</main>
+<div id="toast" class="toast hidden"></div>
+
+<script>
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(() => {}));
+}
+(() => {
+  const $ = id => document.getElementById(id);
+  const video = $('video');
+  let srcURL = null, fileBase = 'video', dur = 0;
+  let start = 0, end = 0, loopPlay = false;
+  let outBlob = null, outURL = null, cancelled = false, busy = false;
+  let srcFps = null, fpsDetecting = false, detectToken = 0, fpsPromise = null;
+
+  // 프레임 비교용 서명 (같은 프레임이면 같은 값)
+  function frameSig(ctx, w, h) {
+    const d = ctx.getImageData(0, 0, w, h).data;
+    let a = 0, b = 0;
+    for (let k = 0; k < d.length; k += 4 * 5) {
+      a = (a + d[k] + d[k + 1] * 3 + d[k + 2] * 7) | 0;
+      b = (Math.imul(b, 31) + d[k + 1]) | 0;
+    }
+    return a + ':' + b;
+  }
+
+  // 원본 영상의 FPS를 실제 재생 프레임 간격으로 측정
+  async function detectFps(url, t0) {
+    const v = document.createElement('video');
+    v.muted = true; v.playsInline = true; v.preload = 'auto'; v.src = url;
+    if (!('requestVideoFrameCallback' in v)) return null;
+    try {
+      await new Promise((res, rej) => {
+        v.addEventListener('loadeddata', res, { once: true });
+        v.addEventListener('error', rej, { once: true });
+        setTimeout(rej, 5000);
+      });
+      await seekTo(v, t0);
+      const times = [];
+      await new Promise(res => {
+        const to = setTimeout(res, 3000);
+        const cb = (now, md) => {
+          times.push(md.mediaTime);
+          if (times.length >= 25) { clearTimeout(to); res(); } else v.requestVideoFrameCallback(cb);
+        };
+        v.requestVideoFrameCallback(cb);
+        v.play().catch(() => { clearTimeout(to); res(); });
+      });
+      v.pause();
+      const d = [];
+      for (let i = 1; i < times.length; i++) { const x = times[i] - times[i - 1]; if (x > 0.004 && x < 0.5) d.push(x); }
+      if (d.length < 5) return null;
+      d.sort((a, b) => a - b);
+      const q = d[Math.floor(d.length * 0.3)]; // 렌더링에서 빠진 프레임(간격 2배)은 무시
+      let fps = 1 / q;
+      const common = [10, 12, 15, 20, 23.976, 24, 25, 29.97, 30, 48, 50, 59.94, 60, 90, 120];
+      let best = null;
+      for (const c of common) if (Math.abs(c - fps) / c < 0.05 && (!best || Math.abs(c - fps) < Math.abs(best - fps))) best = c;
+      fps = best || Math.round(fps);
+      return fps >= 1 && fps <= 240 ? fps : null;
+    } catch (e) { return null; }
+    finally { v.pause(); v.removeAttribute('src'); v.load(); }
+  }
+
+  // ---- 지원 확인 ----
+  const testC = document.createElement('canvas'); testC.width = testC.height = 2;
+  const webpOK = testC.toDataURL('image/webp').startsWith('data:image/webp');
+  if (!webpOK) { $('unsupported').classList.remove('hidden'); }
+
+  const fmt = t => (Math.max(0, t)).toFixed(2) + '초';
+  function toast(msg, ms = 2200) {
+    const el = $('toast'); el.textContent = msg; el.classList.remove('hidden');
+    clearTimeout(toast._t); toast._t = setTimeout(() => el.classList.add('hidden'), ms);
+  }
+
+  // ---- 파일 선택 ----
+  function loadVideoBlob(f, name) {
+    if (srcURL) URL.revokeObjectURL(srcURL);
+    srcURL = URL.createObjectURL(f);
+    fileBase = (name || 'video').replace(/\.[^.]+$/, '') || 'video';
+    $('fileInfo').textContent = `${name} · ${(f.size / 1048576).toFixed(1)}MB`;
+    $('fileInfo').classList.remove('hidden');
+    video.src = srcURL;
+    video.load();
+    $('result').classList.add('hidden');
+  }
+  $('file').addEventListener('change', e => {
+    const f = e.target.files && e.target.files[0];
+    if (!f) return;
+    loadVideoBlob(f, f.name || 'video');
+  });
+
+  // ---- 트위터(X) ----
+  function tweetId(str) {
+    str = (str || '').trim();
+    const m = str.match(/status(?:es)?\/(\d{5,25})/i);
+    if (m) return m[1];
+    if (/^\d{5,25}$/.test(str)) return str;
+    return null;
+  }
+  const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  function dimsFromUrl(u) { const m = String(u).match(/\/(\d{2,5})x(\d{2,5})\//); return m ? { w: +m[1], h: +m[2] } : {}; }
+  function normVariants(list, fallback) {
+    let out = (list || []).filter(v => v && v.url && (/mp4/i.test(v.content_type || v.container || '') || /\.mp4(\?|$)/i.test(v.url)))
+      .map(v => { const d = dimsFromUrl(v.url); return { url: v.url, bitrate: v.bitrate || v.bit_rate || 0, w: d.w || v.width, h: d.h || v.height }; });
+    if (!out.length && fallback && fallback.url) {
+      const d = dimsFromUrl(fallback.url);
+      out = [{ url: fallback.url, bitrate: 0, w: d.w || fallback.w, h: d.h || fallback.h }];
+    }
+    const seen = new Set();
+    out = out.filter(v => !seen.has(v.url) && seen.add(v.url));
+    out.sort((a, b) => (b.bitrate - a.bitrate) || ((b.h || 0) - (a.h || 0)));
+    return out;
+  }
+  async function fetchJSON(url) {
+    const r = await fetch(url, { headers: { 'Accept': 'application/json' } });
+    let j = null; try { j = await r.json(); } catch (e) {}
+    if (!r.ok && !j) throw new Error('HTTP ' + r.status);
+    return j || {};
+  }
+  async function getTweetVideos(id) {
+    const errs = [];
+    // 1) FxTwitter
+    try {
+      const j = await fetchJSON(`https://api.fxtwitter.com/status/${id}`);
+      const t = j.tweet || j.status;
+      if (t) {
+        const media = t.media || {};
+        let vids = media.videos || (media.all || []).filter(m => /video|gif/.test(m.type));
+        vids = (vids || []).map(v => ({
+          thumb: v.thumbnail_url || v.thumbnail, isGif: v.type === 'gif',
+          variants: normVariants(v.variants || v.formats, { url: v.url, w: v.width, h: v.height })
+        })).filter(v => v.variants.length);
+        return { user: t.author && (t.author.screen_name || t.author.name), text: t.text || (t.raw_text && t.raw_text.text) || '', videos: vids };
+      }
+      errs.push(j.message || 'FxTwitter 응답 없음');
+    } catch (e) { errs.push('FxTwitter: ' + e.message); }
+    // 2) vxTwitter
+    try {
+      const j = await fetchJSON(`https://api.vxtwitter.com/i/status/${id}`);
+      const list = (j.media_extended || []).filter(m => /video|gif/.test(m.type));
+      if (j.tweetID || list.length) {
+        return {
+          user: j.user_screen_name, text: j.text || '',
+          videos: list.map(m => ({ thumb: m.thumbnail_url, isGif: m.type === 'gif',
+            variants: normVariants([], { url: m.url, w: m.size && m.size.width, h: m.size && m.size.height }) }))
+        };
+      }
+      errs.push(j.error || 'vxTwitter 응답 없음');
+    } catch (e) { errs.push('vxTwitter: ' + e.message); }
+    throw new Error(errs.join(' / '));
+  }
+  async function fetchVideoBlob(url, onProg) {
+    const r = await fetch(url);
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const total = +r.headers.get('content-length') || 0;
+    if (!r.body || !r.body.getReader) return await r.blob();
+    const rd = r.body.getReader(); const chunks = []; let got = 0;
+    for (;;) {
+      const { done, value } = await rd.read();
+      if (done) break;
+      chunks.push(value); got += value.length;
+      onProg && onProg(got, total);
+    }
+    return new Blob(chunks, { type: 'video/mp4' });
+  }
+  function saveBlob(blob, name) {
+    const u = URL.createObjectURL(blob);
+    const a = document.createElement('a'); a.href = u; a.download = name;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(u), 60000);
+  }
+
+  $('pasteBtn').onclick = async () => {
+    try { const t = await navigator.clipboard.readText(); if (t) { $('tw').value = t.trim(); $('twBtn').click(); } }
+    catch (e) { toast('붙여넣기 권한이 없습니다. 입력칸을 길게 눌러 붙여넣어 주세요.'); }
+  };
+  // 다른 앱(X 등)에서 '공유'로 들어온 링크 자동 처리
+  (() => {
+    try {
+      const q = new URLSearchParams(location.search);
+      const shared = [q.get('url'), q.get('text'), q.get('title')].filter(Boolean).join(' ');
+      if (shared) {
+        const m = shared.match(/https?:\/\/\S*status(?:es)?\/\d+\S*/i);
+        $('tw').value = m ? m[0] : shared.trim();
+        history.replaceState(null, '', location.pathname);
+        setTimeout(() => $('twBtn').click(), 100);
+      }
+    } catch (e) {}
+  })();
+  $('tw').addEventListener('keydown', e => { if (e.key === 'Enter') $('twBtn').click(); });
+
+  $('twBtn').onclick = async () => {
+    const id = tweetId($('tw').value);
+    const st = $('twStatus'), list = $('twList');
+    list.innerHTML = '';
+    if (!id) { st.innerHTML = '<span class="err">트윗 링크(…/status/숫자)를 넣어 주세요.</span>'; return; }
+    st.textContent = '영상 정보 가져오는 중…';
+    $('twBtn').disabled = true;
+    const direct = `https://d.fxtwitter.com/i/status/${id}.mp4`;
+    try {
+      const info = await getTweetVideos(id);
+      if (!info.videos.length) {
+        st.innerHTML = '<span class="warn">이 트윗에서 영상을 찾지 못했습니다.</span>';
+        return;
+      }
+      st.innerHTML = `@${esc(info.user || '')} · 영상 ${info.videos.length}개`;
+      info.videos.forEach((v, vi) => {
+        const box = document.createElement('div'); box.className = 'vid';
+        let html = v.thumb ? `<img src="${esc(v.thumb)}" alt="" referrerpolicy="no-referrer">` : '';
+        if (vi === 0 && info.text) html += `<div class="tweettext">${esc(info.text)}</div>`;
+        v.variants.forEach((q, qi) => {
+          const label = (q.w && q.h ? `${Math.min(q.w, q.h)}p (${q.w}×${q.h})` : '화질 ' + (qi + 1)) + (q.bitrate ? ` · ${Math.round(q.bitrate / 1000)}kbps` : '');
+          html += `<div class="q"><span class="ql">${esc(label)}</span>
+            <button class="btn small" data-act="save" data-v="${vi}" data-q="${qi}">⬇ 저장</button>
+            <button class="btn small" data-act="webp" data-v="${vi}" data-q="${qi}">🎞 WebP로</button></div>`;
+        });
+        html += `<div class="info" data-msg="${vi}"></div>`;
+        box.innerHTML = html;
+        list.appendChild(box);
+      });
+      list.onclick = async e => {
+        const b = e.target.closest('button[data-act]'); if (!b) return;
+        const vi = +b.dataset.v, qi = +b.dataset.q, q = info.videos[vi].variants[qi];
+        const msg = list.querySelector(`[data-msg="${vi}"]`);
+        const name = `x_${id}${info.videos.length > 1 ? '_' + (vi + 1) : ''}.mp4`;
+        const btns = list.querySelectorAll('button'); btns.forEach(x => x.disabled = true);
+        try {
+          msg.textContent = '영상 받는 중…';
+          const blob = await fetchVideoBlob(q.url, (g, t) => {
+            msg.textContent = t ? `영상 받는 중… ${Math.round(g / t * 100)}% (${(g / 1048576).toFixed(1)}MB)` : `영상 받는 중… ${(g / 1048576).toFixed(1)}MB`;
+          });
+          if (b.dataset.act === 'save') {
+            saveBlob(blob, name);
+            msg.textContent = `저장했습니다 (${(blob.size / 1048576).toFixed(1)}MB). 다운로드 폴더를 확인하세요.`;
+          } else {
+            loadVideoBlob(blob, name);
+            msg.textContent = '아래 변환기로 불러왔습니다. 구간을 정하고 변환하세요.';
+            setTimeout(() => $('editor').scrollIntoView({ behavior: 'smooth', block: 'start' }), 400);
+          }
+        } catch (err) {
+          msg.innerHTML = `<span class="warn">앱 안에서 바로 받지 못했습니다.</span> <a class="link" href="${esc(q.url)}" target="_blank" rel="noreferrer">영상 열기</a>를 누른 뒤, 열린 화면에서 <b>⋮ → 다운로드</b>로 저장하세요.`;
+        } finally { btns.forEach(x => x.disabled = false); }
+      };
+    } catch (err) {
+      st.innerHTML = `<span class="warn">여기서는 화질 목록을 불러올 수 없어서, 가장 좋은 화질로 바로 엽니다.</span>
+        <a class="btn" href="${esc(direct)}" target="_blank" rel="noreferrer"
+           style="display:block;text-align:center;margin:10px 0;background:var(--accent);border-color:var(--accent);color:#fff;font-weight:700;text-decoration:none">▶ 영상 열기</a>
+        열린 화면에서 <b>⋮ → 다운로드</b>(또는 영상을 길게 눌러 저장)하세요. 받은 영상은 아래 <b>폰에 있는 동영상</b>에서 골라 WebP로 바꿀 수 있습니다.
+        <div style="font-size:12px;margin-top:4px;opacity:.7">(${esc(err.message)})</div>`;
+    } finally { $('twBtn').disabled = false; }
+  };
+
+  video.addEventListener('loadedmetadata', () => {
+    dur = video.duration;
+    if (!isFinite(dur) || dur <= 0) { toast('동영상 길이를 읽지 못했습니다.'); return; }
+    start = 0; end = Math.min(dur, 3); // 기본 3초 구간
+    for (const r of [$('startR'), $('endR')]) { r.max = dur.toFixed(2); }
+    $('durTime').textContent = '/ ' + fmt(dur);
+    $('editor').classList.remove('hidden');
+    $('settings').classList.remove('hidden');
+    srcFps = null; fpsDetecting = true;
+    syncUI();
+    const tok = ++detectToken;
+    fpsPromise = detectFps(srcURL, Math.min(dur * 0.3, Math.max(0, dur - 2))).then(f => {
+      if (tok !== detectToken) return;
+      srcFps = f; fpsDetecting = false; updateEstimate();
+    });
+  });
+
+  // ---- 구간 UI ----
+  function clamp() {
+    start = Math.max(0, Math.min(start, dur));
+    end = Math.max(0, Math.min(end, dur));
+    if (end - start < 0.05) {
+      if (end >= dur) start = Math.max(0, end - 0.05); else end = Math.min(dur, start + 0.05);
+    }
+  }
+  function syncUI() {
+    clamp();
+    $('startR').value = start; $('endR').value = end;
+    if (document.activeElement !== $('startNum')) $('startNum').value = start.toFixed(2);
+    if (document.activeElement !== $('endNum')) $('endNum').value = end.toFixed(2);
+    $('lenTxt').textContent = fmt(end - start);
+    $('selBar').style.left = (start / dur * 100) + '%';
+    $('selBar').style.width = ((end - start) / dur * 100) + '%';
+    updateEstimate();
+  }
+  function seekPreview(t) { video.currentTime = Math.max(0, Math.min(dur, t)); }
+
+  $('startR').addEventListener('input', e => { start = +e.target.value; if (start > end - 0.05) end = Math.min(dur, start + 0.05); syncUI(); seekPreview(start); });
+  $('endR').addEventListener('input', e => { end = +e.target.value; if (end < start + 0.05) start = Math.max(0, end - 0.05); syncUI(); seekPreview(end); });
+  // 숫자 입력: 초(12.5) 또는 분:초(1:02.5) 형식
+  function parseTime(str) {
+    str = String(str || '').trim().replace(/,/g, '.').replace(/초|s$/gi, '');
+    if (!str) return NaN;
+    const parts = str.split(':');
+    if (parts.length > 3 || parts.some(x => x === '' || isNaN(+x))) return NaN;
+    return parts.reduce((acc, x) => acc * 60 + (+x), 0);
+  }
+  function commitNum(which) {
+    const el = $(which === 'start' ? 'startNum' : 'endNum');
+    const v = parseTime(el.value);
+    if (!isFinite(v)) { toast('숫자로 입력해 주세요 (예: 12.5 또는 1:02.5)'); syncUIForce(); return; }
+    if (which === 'start') { start = v; if (end <= start + 0.05) end = Math.min(dur, start + 1); }
+    else { end = v; if (end <= start + 0.05) start = Math.max(0, end - 1); }
+    syncUIForce();
+    seekPreview(which === 'start' ? start : end);
+  }
+  function syncUIForce() {
+    syncUI();
+    $('startNum').value = start.toFixed(2); $('endNum').value = end.toFixed(2);
+  }
+  for (const w of ['start', 'end']) {
+    const el = $(w + 'Num');
+    el.addEventListener('change', () => commitNum(w));
+    el.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); el.blur(); } });
+    el.addEventListener('focus', () => el.select());
+  }
+  $('sMinus').onclick = () => { start -= 0.1; syncUI(); seekPreview(start); };
+  $('sPlus').onclick  = () => { start += 0.1; syncUI(); seekPreview(start); };
+  $('eMinus').onclick = () => { end -= 0.1; syncUI(); seekPreview(end); };
+  $('ePlus').onclick  = () => { end += 0.1; syncUI(); seekPreview(end); };
+  $('setStart').onclick = () => { start = video.currentTime; if (end <= start) end = Math.min(dur, start + 1); syncUI(); toast('시작 지점: ' + fmt(start)); };
+  $('setEnd').onclick = () => { end = video.currentTime; if (end <= start) start = Math.max(0, end - 1); syncUI(); toast('끝 지점: ' + fmt(end)); };
+  $('back1').onclick = () => seekPreview(video.currentTime - 1);
+  $('backF').onclick = () => seekPreview(video.currentTime - 0.1);
+  $('fwdF').onclick  = () => seekPreview(video.currentTime + 0.1);
+  $('fwd1').onclick  = () => seekPreview(video.currentTime + 1);
+
+  $('playBtn').onclick = () => {
+    loopPlay = false; $('loopBtn').textContent = '🔁 선택 구간 반복 재생';
+    if (video.paused) video.play().catch(() => {}); else video.pause();
+  };
+  $('loopBtn').onclick = () => {
+    loopPlay = !loopPlay;
+    $('loopBtn').textContent = loopPlay ? '⏹ 반복 재생 멈추기' : '🔁 선택 구간 반복 재생';
+    if (loopPlay) { video.currentTime = start; video.play().catch(() => {}); } else video.pause();
+  };
+  video.addEventListener('play', () => $('playBtn').textContent = '⏸ 일시정지');
+  video.addEventListener('pause', () => $('playBtn').textContent = '▶ 재생');
+  video.addEventListener('timeupdate', () => {
+    if (busy) return;
+    $('curTime').textContent = fmt(video.currentTime);
+    $('headBar').style.left = (video.currentTime / dur * 100) + '%';
+    if (loopPlay && video.currentTime >= end) video.currentTime = start;
+  });
+  $('track').addEventListener('click', e => {
+    const r = e.currentTarget.getBoundingClientRect();
+    seekPreview((e.clientX - r.left) / r.width * dur);
+  });
+
+  // ---- 설정/예상 ----
+  function opts() {
+    return {
+      fps: +$('fps').value, width: +$('width').value, q: +$('quality').value,
+      speed: +$('speed').value, loop: $('loop').checked, boomerang: $('boomerang').checked
+    };
+  }
+  function outSize(o) {
+    const vw = video.videoWidth || 1, vh = video.videoHeight || 1;
+    let w = o.width && o.width < vw ? o.width : vw;
+    w = Math.min(w, 16383);
+    let h = Math.round(vh * w / vw);
+    return { w: Math.max(1, Math.round(w)), h: Math.max(1, Math.min(h, 16383)) };
+  }
+  // 실제로 쓸 FPS: 원본보다 높게 뽑으면 같은 프레임이 반복되어 끊겨 보이므로 원본 FPS로 제한
+  function effFps(o) {
+    if (o.fps === 0) return srcFps || 30;
+    return srcFps ? Math.min(o.fps, srcFps) : o.fps;
+  }
+  function frameCount(o) { return Math.max(1, Math.floor((end - start) * effFps(o) / o.speed + 1e-6)); }
+  function updateEstimate() {
+    if (!dur) return;
+    const o = opts(), n = frameCount(o), s = outSize(o), f = effFps(o);
+    let total = n; if (o.boomerang && n > 2) total = n * 2 - 2;
+    const outDur = total / f;
+    let txt = `${s.w}×${s.h} · ${(+f.toFixed(2))}fps · 프레임 약 ${total}개 · 재생 길이 약 ${outDur.toFixed(1)}초`;
+    txt += srcFps ? `<br>원본 영상: ${(+srcFps.toFixed(2))}fps` : (fpsDetecting ? '<br>원본 FPS 확인 중…' : '');
+    if (srcFps && o.fps > srcFps) txt += ` <span class="warn">· 원본보다 높은 FPS는 원본(${(+srcFps.toFixed(2))}fps)으로 맞춥니다</span>`;
+    if (total > 450) txt += ' <span class="warn">· 프레임이 많아 오래 걸리고 용량이 커질 수 있습니다</span>';
+    $('estimate').innerHTML = txt;
+  }
+  ['fps', 'width', 'quality', 'speed', 'loop', 'boomerang'].forEach(id => $(id).addEventListener('change', updateEstimate));
+
+  // ---- WebP 조립 ----
+  const enc = new TextEncoder();
+  function le(n, bytes) { const a = new Uint8Array(bytes); for (let i = 0; i < bytes; i++) a[i] = (n >>> (8 * i)) & 255; return a; }
+  function chunk(id, payload) {
+    const pad = payload.length & 1;
+    const out = new Uint8Array(8 + payload.length + pad);
+    out.set(enc.encode(id), 0); out.set(le(payload.length, 4), 4); out.set(payload, 8);
+    return out;
+  }
+  function parseFrame(buf) {
+    const u = new Uint8Array(buf), dv = new DataView(buf);
+    const tag = String.fromCharCode(...u.subarray(8, 12));
+    if (String.fromCharCode(...u.subarray(0, 4)) !== 'RIFF' || tag !== 'WEBP') throw new Error('WebP 인코딩 실패');
+    let off = 12; const parts = []; let alpha = false;
+    while (off + 8 <= u.length) {
+      const id = String.fromCharCode(...u.subarray(off, off + 4));
+      const size = dv.getUint32(off + 4, true);
+      const data = u.subarray(off + 8, Math.min(u.length, off + 8 + size));
+      if (id === 'ALPH' || id === 'VP8 ' || id === 'VP8L') {
+        parts.push(chunk(id, data));
+        if (id !== 'VP8 ') alpha = true;
+      }
+      off += 8 + size + (size & 1);
+    }
+    if (!parts.length) throw new Error('프레임 데이터 없음');
+    return { parts, alpha };
+  }
+  function buildAnimated(frames, w, h, durations, loop) {
+    const anyAlpha = frames.some(f => f.alpha);
+    const vp8x = new Uint8Array(10);
+    vp8x[0] = 0x02 | (anyAlpha ? 0x10 : 0); // animation (+alpha)
+    vp8x.set(le(w - 1, 3), 4); vp8x.set(le(h - 1, 3), 7);
+    const anim = new Uint8Array(6); // 배경색 0, 반복 횟수
+    anim.set(le(loop ? 0 : 1, 2), 4);
+    const blobs = [chunk('VP8X', vp8x), chunk('ANIM', anim)];
+    frames.forEach((f, i) => {
+      const hdr = new Uint8Array(16);
+      // x/2=0, y/2=0
+      hdr.set(le(w - 1, 3), 6); hdr.set(le(h - 1, 3), 9);
+      hdr.set(le(Math.max(1, durations[i]), 3), 12);
+      hdr[15] = 0x02; // 블렌딩 안 함, 폐기 안 함
+      const fl = f.parts.reduce((s, p) => s + p.length, 0);
+      const payload = new Uint8Array(16 + fl);
+      payload.set(hdr, 0); let o = 16;
+      for (const p of f.parts) { payload.set(p, o); o += p.length; }
+      blobs.push(chunk('ANMF', payload));
+    });
+    const body = blobs.reduce((s, b) => s + b.length, 0);
+    return new Blob([enc.encode('RIFF'), le(4 + body, 4), enc.encode('WEBP'), ...blobs], { type: 'image/webp' });
+  }
+
+  // ---- 변환 ----
+  function seekTo(v, t) {
+    return new Promise(res => {
+      let done = false;
+      const fin = () => { if (done) return; done = true; v.removeEventListener('seeked', fin); clearTimeout(to); res(); };
+      const to = setTimeout(fin, 4000);
+      v.addEventListener('seeked', fin);
+      v.currentTime = t;
+    });
+  }
+  const toBlob = (c, q) => new Promise((res, rej) => c.toBlob(b => b ? res(b) : rej(new Error('인코딩 실패')), 'image/webp', q));
+
+  $('cancelBtn').onclick = () => { cancelled = true; };
+
+  $('convertBtn').onclick = async () => {
+    if (busy || !dur) return;
+    if (!webpOK) { toast('이 브라우저는 WebP 저장을 지원하지 않습니다.'); return; }
+    busy = true; cancelled = false; loopPlay = false; video.pause();
+    $('loopBtn').textContent = '🔁 선택 구간 반복 재생';
+    $('convertBtn').disabled = true;
+    $('progressWrap').classList.remove('hidden');
+    $('result').classList.add('hidden');
+    if (fpsDetecting && fpsPromise) { $('progTxt').textContent = '원본 FPS 확인 중…'; await fpsPromise; }
+    const o = opts(), { w, h } = outSize(o), n = frameCount(o);
+    const canvas = document.createElement('canvas'); canvas.width = w; canvas.height = h;
+    const ctx = canvas.getContext('2d', { alpha: false, willReadFrequently: true });
+    const fpsOut = effFps(o);
+    ctx.imageSmoothingQuality = 'high';
+
+    // 변환 전용 비디오 (미리보기와 분리)
+    const pv = document.createElement('video');
+    pv.muted = true; pv.playsInline = true; pv.preload = 'auto'; pv.src = srcURL;
+    try {
+      await new Promise((res, rej) => {
+        if (pv.readyState >= 2) return res();
+        pv.addEventListener('loadeddata', res, { once: true });
+        pv.addEventListener('error', () => rej(new Error('동영상을 열 수 없습니다')), { once: true });
+      });
+      const frames = [];
+      const step = o.speed / fpsOut;
+      const per = 1000 / fpsOut;
+      const durOf = i => Math.round((i + 1) * per) - Math.round(i * per);
+      let prevSig = null, merged = 0;
+      for (let i = 0; i < n; i++) {
+        if (cancelled) throw new Error('cancel');
+        // 프레임 경계가 아니라 프레임 한가운데 시점을 잡아 반올림 오차로 같은 프레임이 두 번 잡히지 않게 함
+        const t = Math.min(end, start + (i + 0.5) * step);
+        await seekTo(pv, Math.min(t, dur - 0.001));
+        ctx.drawImage(pv, 0, 0, w, h);
+        const sig = frameSig(ctx, w, h);
+        if (sig === prevSig && frames.length) {
+          // 이전과 똑같은 프레임이면 새로 넣지 않고 이전 프레임 표시 시간을 늘림
+          frames[frames.length - 1].dur += durOf(i); merged++;
+        } else {
+          const b = await toBlob(canvas, o.q);
+          const fr = parseFrame(await b.arrayBuffer());
+          fr.dur = durOf(i);
+          frames.push(fr);
+          prevSig = sig;
+        }
+        const p = (i + 1) / n;
+        $('bar').style.width = (p * 95) + '%';
+        $('progTxt').textContent = `프레임 처리 중… ${i + 1} / ${n}`;
+      }
+      let seq = frames;
+      if (o.boomerang && frames.length > 2) seq = frames.concat(frames.slice(1, -1).reverse());
+      const durations = seq.map(f => f.dur);
+      $('progTxt').textContent = '파일 만드는 중…';
+      outBlob = buildAnimated(seq, w, h, durations, o.loop);
+      $('bar').style.width = '100%';
+      if (outURL) URL.revokeObjectURL(outURL);
+      outURL = URL.createObjectURL(outBlob);
+      $('outImg').src = outURL;
+      $('outInfo').textContent = `${w}×${h} · ${(+fpsOut.toFixed(2))}fps · 프레임 ${seq.length}개 · ${(outBlob.size / 1048576).toFixed(2)}MB` + (merged ? ` · 중복 ${merged}개 합침` : '');
+      $('result').classList.remove('hidden');
+      $('saveHint').textContent = '';
+      setTimeout(() => $('result').scrollIntoView({ behavior: 'smooth', block: 'start' }), 50);
+      $('progTxt').textContent = '완료!';
+    } catch (err) {
+      if (err.message === 'cancel') { $('progTxt').textContent = '취소했습니다.'; }
+      else { $('progTxt').innerHTML = '<span class="err">오류: ' + err.message + '</span>'; }
+    } finally {
+      pv.removeAttribute('src'); pv.load();
+      busy = false; $('convertBtn').disabled = false;
+      setTimeout(() => { if (!busy) $('progressWrap').classList.add('hidden'); }, 2500);
+    }
+  };
+
+  // ---- 저장 ----
+  let downloads = null;
+  try {
+    if (window.claude && typeof window.claude.use === 'function') {
+      window.claude.use('downloads').then(d => { downloads = d; }).catch(() => {});
+    }
+  } catch (e) {}
+
+  $('saveBtn').onclick = async () => {
+    if (!outBlob) return;
+    const name = `${fileBase}_${start.toFixed(1)}-${end.toFixed(1)}s.webp`;
+    if (downloads) {
+      try {
+        await downloads.save({ filename: name, data: outBlob });
+        $('saveHint').textContent = '저장했습니다.';
+      } catch (e) {
+        const c = e && e.code;
+        if (c === 'declined') $('saveHint').textContent = '저장을 취소했습니다.';
+        else if (c === 'rate_limited') $('saveHint').textContent = '잠시 후 다시 눌러 주세요.';
+        else $('saveHint').textContent = '여기서는 저장할 수 없습니다. 위 이미지를 길게 눌러 저장해 보세요.';
+      }
+      return;
+    }
+    // 일반 브라우저에서 직접 열었을 때
+    try {
+      saveBlob(outBlob, name);
+      $('saveHint').textContent = '다운로드가 시작되지 않으면 위 이미지를 길게 눌러 저장하세요.';
+    } catch (e) {
+      $('saveHint').textContent = '위 이미지를 길게 눌러 저장하세요.';
+    }
+  };
+})();
+</script>
+</body>
+</html>
