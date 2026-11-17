@@ -26,6 +26,17 @@
   .pickwrap{position:relative;overflow:hidden;border-radius:12px}
   .pickwrap input[type=file]{position:absolute;inset:0;width:100%;height:100%;opacity:0;cursor:pointer;font-size:100px;z-index:2}
   video{width:100%;max-height:52vh;background:#000;border-radius:10px;display:block}
+  .stage{position:relative}
+  .cropLayer{position:absolute;inset:0;overflow:hidden;border-radius:10px;touch-action:none}
+  .cropBox{position:absolute;border:2px solid #fff;touch-action:none;
+    background-image:linear-gradient(rgba(255,255,255,.35) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.35) 1px,transparent 1px);
+    background-size:33.333% 33.333%;background-position:-1px -1px}
+  .shade{position:absolute;background:rgba(0,0,0,.6);pointer-events:none}
+  .hnd{position:absolute;width:26px;height:26px;background:#fff;border:3px solid var(--accent);border-radius:50%;touch-action:none}
+  .hnd.tl{left:-4px;top:-4px}.hnd.tr{right:-4px;top:-4px}.hnd.bl{left:-4px;bottom:-4px}.hnd.br{right:-4px;bottom:-4px}
+  .chips{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
+  .chip{padding:7px 11px;border-radius:999px;border:1px solid var(--line);background:#232835;color:var(--text);font-size:13px}
+  .chip.on{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:700}
   .row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
   .between{justify-content:space-between}
   .btn{appearance:none;border:1px solid var(--line);background:#232835;color:var(--text);border-radius:10px;
@@ -55,7 +66,7 @@
   .result img{max-width:100%;border-radius:10px;display:block;margin:0 auto 10px;background:
     repeating-conic-gradient(#2a2f3a 0 25%, #20242d 0 50%) 0 0/16px 16px}
   .hidden{display:none !important}
-  .num{width:96px;padding:8px 10px;border-radius:10px;border:1px solid var(--line);background:#232835;color:var(--text);
+  input[type=text].num{width:96px;padding:8px 10px;border-radius:10px;border:1px solid var(--line);background:#232835;color:var(--text);
     font-size:16px;font-weight:700;text-align:right;font-variant-numeric:tabular-nums}
   .num:focus{outline:2px solid var(--accent);border-color:var(--accent)}
   input[type=url],input[type=text]{width:100%;padding:12px;border-radius:10px;border:1px solid var(--line);background:#232835;color:var(--text);font-size:15px}
@@ -103,7 +114,16 @@
   <!-- 2. 구간 편집 -->
   <div id="editor" class="card hidden">
     <h2>✂️ 구간 편집</h2>
-    <video id="video" playsinline muted preload="auto"></video>
+    <div class="stage" id="stage">
+      <video id="video" playsinline muted preload="auto"></video>
+      <div class="cropLayer hidden" id="cropLayer">
+        <div class="shade" id="shT"></div><div class="shade" id="shB"></div><div class="shade" id="shL"></div><div class="shade" id="shR"></div>
+        <div class="cropBox" id="cropBox">
+          <div class="hnd tl" data-h="tl"></div><div class="hnd tr" data-h="tr"></div>
+          <div class="hnd bl" data-h="bl"></div><div class="hnd br" data-h="br"></div>
+        </div>
+      </div>
+    </div>
 
     <div class="track" id="track"><div class="sel" id="selBar"></div><div class="head" id="headBar"></div></div>
     <div class="row between label"><span id="curTime">0.00초</span><span id="durTime">/ 0.00초</span></div>
@@ -140,6 +160,24 @@
       <button class="btn grow" id="loopBtn">🔁 선택 구간 반복 재생</button>
     </div>
     <div class="info">선택 구간 길이: <b id="lenTxt">0.00초</b></div>
+
+    <div style="margin-top:14px;border-top:1px solid var(--line);padding-top:12px">
+      <div class="row between">
+        <label class="check" style="padding:0"><input type="checkbox" id="cropOn"> <b>🔲 영역 자르기</b></label>
+        <button class="btn small hidden" id="cropReset">전체로</button>
+      </div>
+      <div id="cropUI" class="hidden">
+        <div class="chips" id="ratios">
+          <button class="chip on" data-r="0">자유</button>
+          <button class="chip" data-r="1">1:1</button>
+          <button class="chip" data-r="0.8">4:5</button>
+          <button class="chip" data-r="0.5625">9:16</button>
+          <button class="chip" data-r="1.7778">16:9</button>
+          <button class="chip" data-r="1.3333">4:3</button>
+        </div>
+        <div class="info">영상 위의 네모를 끌어서 옮기고, 모서리 동그라미로 크기를 바꾸세요. 선택한 영역: <b id="cropTxt"></b></div>
+      </div>
+    </div>
   </div>
 
   <!-- 3. 설정 -->
@@ -580,8 +618,111 @@ if ('serviceWorker' in navigator) {
       speed: +$('speed').value, loop: $('loop').checked, boomerang: $('boomerang').checked
     };
   }
-  function outSize(o) {
+  // ---- 영역 자르기 ----
+  // crop: 원본 영상 기준 0~1 비율 좌표
+  let crop = { x: 0, y: 0, w: 1, h: 1 }, cropRatio = 0;
+  const cropEnabled = () => $('cropOn').checked;
+  function cropPx() {
     const vw = video.videoWidth || 1, vh = video.videoHeight || 1;
+    if (!cropEnabled()) return { sx: 0, sy: 0, sw: vw, sh: vh };
+    let sx = Math.round(crop.x * vw), sy = Math.round(crop.y * vh);
+    let sw = Math.max(2, Math.round(crop.w * vw)), sh = Math.max(2, Math.round(crop.h * vh));
+    sw = Math.min(sw, vw - sx); sh = Math.min(sh, vh - sy);
+    return { sx, sy, sw, sh };
+  }
+  // 화면에 실제로 그려지는 영상 영역 (검은 여백 제외)
+  function contentRect() {
+    const W = video.clientWidth, H = video.clientHeight;
+    const vw = video.videoWidth || 1, vh = video.videoHeight || 1;
+    const sc = Math.min(W / vw, H / vh);
+    const dw = vw * sc, dh = vh * sc;
+    return { left: (W - dw) / 2, top: (H - dh) / 2, w: dw, h: dh };
+  }
+  function drawCrop() {
+    const c = contentRect(), b = $('cropBox');
+    b.style.left = (c.left + crop.x * c.w) + 'px'; b.style.top = (c.top + crop.y * c.h) + 'px';
+    b.style.width = (crop.w * c.w) + 'px'; b.style.height = (crop.h * c.h) + 'px';
+    const L = c.left + crop.x * c.w, T = c.top + crop.y * c.h, R = L + crop.w * c.w, B = T + crop.h * c.h;
+    const set = (id, l, t, w, h) => Object.assign($(id).style, { left: l + 'px', top: t + 'px', width: Math.max(0, w) + 'px', height: Math.max(0, h) + 'px' });
+    set('shT', 0, 0, video.clientWidth, T); set('shB', 0, B, video.clientWidth, video.clientHeight - B);
+    set('shL', 0, T, L, B - T); set('shR', R, T, video.clientWidth - R, B - T);
+    const r = cropPx(); $('cropTxt').textContent = `${r.sw}×${r.sh}`;
+    updateEstimate();
+  }
+  // 비율(가로/세로, 원본 픽셀 기준)을 정규화 좌표 비율로 변환
+  const normRatio = r => r * (video.videoHeight || 1) / (video.videoWidth || 1);
+  function applyRatio(r) {
+    cropRatio = r;
+    if (r) {
+      const nr = normRatio(r);
+      let w = crop.w, h = w / nr;
+      if (h > crop.h || h > 1) { h = Math.min(crop.h, 1); w = h * nr; }
+      if (w > 1) { w = 1; h = w / nr; }
+      const cx = crop.x + crop.w / 2, cy = crop.y + crop.h / 2;
+      crop = { w, h, x: Math.min(Math.max(0, cx - w / 2), 1 - w), y: Math.min(Math.max(0, cy - h / 2), 1 - h) };
+    }
+    drawCrop();
+  }
+  $('cropOn').addEventListener('change', () => {
+    const on = cropEnabled();
+    ['cropLayer', 'cropUI', 'cropReset'].forEach(id => $(id).classList.toggle('hidden', !on));
+    if (on) { video.pause(); loopPlay = false; requestAnimationFrame(drawCrop); $('stage').scrollIntoView({ behavior: 'smooth', block: 'center' }); } else updateEstimate();
+  });
+  $('cropReset').onclick = () => { crop = { x: 0, y: 0, w: 1, h: 1 }; applyRatio(cropRatio); };
+  $('ratios').addEventListener('click', e => {
+    const b = e.target.closest('.chip'); if (!b) return;
+    document.querySelectorAll('#ratios .chip').forEach(x => x.classList.toggle('on', x === b));
+    applyRatio(+b.dataset.r);
+  });
+  window.addEventListener('resize', () => { if (cropEnabled()) drawCrop(); });
+  video.addEventListener('loadedmetadata', () => { crop = { x: 0, y: 0, w: 1, h: 1 }; if (cropEnabled()) requestAnimationFrame(() => applyRatio(cropRatio)); });
+  (() => {
+    let drag = null;
+    const layer = $('cropLayer');
+    layer.addEventListener('pointerdown', e => {
+      if (!e.target.closest('#cropBox')) return;
+      e.preventDefault();
+      const c = contentRect();
+      drag = { h: e.target.dataset.h || 'move', x0: e.clientX, y0: e.clientY, c0: { ...crop }, c };
+      layer.setPointerCapture(e.pointerId);
+    });
+    layer.addEventListener('pointermove', e => {
+      if (!drag) return;
+      const { c, c0 } = drag;
+      const dx = (e.clientX - drag.x0) / c.w, dy = (e.clientY - drag.y0) / c.h;
+      const MIN = 0.04;
+      if (drag.h === 'move') {
+        crop.x = Math.min(Math.max(0, c0.x + dx), 1 - c0.w);
+        crop.y = Math.min(Math.max(0, c0.y + dy), 1 - c0.h);
+      } else {
+        // 움직이지 않는 반대쪽 모서리
+        const ax = drag.h.includes('l') ? c0.x + c0.w : c0.x;
+        const ay = drag.h.includes('t') ? c0.y + c0.h : c0.y;
+        let px = (drag.h.includes('l') ? c0.x : c0.x + c0.w) + dx;
+        let py = (drag.h.includes('t') ? c0.y : c0.y + c0.h) + dy;
+        px = Math.min(Math.max(0, px), 1); py = Math.min(Math.max(0, py), 1);
+        let w = Math.max(MIN, Math.abs(px - ax)), h = Math.max(MIN, Math.abs(py - ay));
+        if (cropRatio) {
+          const nr = normRatio(cropRatio);
+          if (w / h > nr) w = h * nr; else h = w / nr;
+          const maxW = drag.h.includes('l') ? ax : 1 - ax, maxH = drag.h.includes('t') ? ay : 1 - ay;
+          if (w > maxW) { w = maxW; h = w / nr; }
+          if (h > maxH) { h = maxH; w = h * nr; }
+        } else {
+          w = Math.min(w, drag.h.includes('l') ? ax : 1 - ax);
+          h = Math.min(h, drag.h.includes('t') ? ay : 1 - ay);
+        }
+        crop = { w, h, x: drag.h.includes('l') ? ax - w : ax, y: drag.h.includes('t') ? ay - h : ay };
+      }
+      drawCrop();
+    });
+    const end = () => { drag = null; };
+    layer.addEventListener('pointerup', end); layer.addEventListener('pointercancel', end);
+  })();
+
+  function outSize(o) {
+    const r = cropPx();
+    const vw = r.sw, vh = r.sh;
     let w = o.width && o.width < vw ? o.width : vw;
     w = Math.min(w, 16383);
     let h = Math.round(vh * w / vw);
@@ -705,7 +846,7 @@ if ('serviceWorker' in navigator) {
         // 프레임 경계가 아니라 프레임 한가운데 시점을 잡아 반올림 오차로 같은 프레임이 두 번 잡히지 않게 함
         const t = Math.min(end, start + (i + 0.5) * step);
         await seekTo(pv, Math.min(t, dur - 0.001));
-        ctx.drawImage(pv, 0, 0, w, h);
+        { const r = cropPx(); ctx.drawImage(pv, r.sx, r.sy, r.sw, r.sh, 0, 0, w, h); }
         const sig = frameSig(ctx, w, h);
         if (sig === prevSig && frames.length) {
           // 이전과 똑같은 프레임이면 새로 넣지 않고 이전 프레임 표시 시간을 늘림
