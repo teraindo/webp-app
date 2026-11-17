@@ -355,9 +355,21 @@ if ('serviceWorker' in navigator) {
     } catch (e) { errs.push('vxTwitter: ' + e.message); }
     throw new Error(errs.join(' / '));
   }
-  async function fetchVideoBlob(url, onProg) {
-    const r = await fetch(url);
+  async function fetchOnce(url) {
+    const r = await fetch(url, { mode: 'cors', credentials: 'omit', referrerPolicy: 'no-referrer', cache: 'no-store' });
     if (!r.ok) throw new Error('HTTP ' + r.status);
+    return r;
+  }
+  async function fetchVideoBlob(url, onProg) {
+    let r, lastErr;
+    // 같은 주소 1번 재시도 후, 안 되면 fxtwitter 경유 주소로 시도
+    const tries = [url, url];
+    if (fetchVideoBlob.alt) tries.push(fetchVideoBlob.alt);
+    for (const u of tries) {
+      try { r = await fetchOnce(u); break; }
+      catch (e) { lastErr = e; await new Promise(x => setTimeout(x, 400)); }
+    }
+    if (!r) throw lastErr || new Error('받기 실패');
     const total = +r.headers.get('content-length') || 0;
     if (!r.body || !r.body.getReader) return await r.blob();
     const rd = r.body.getReader(); const chunks = []; let got = 0;
@@ -432,6 +444,7 @@ if ('serviceWorker' in navigator) {
         const btns = list.querySelectorAll('button'); btns.forEach(x => x.disabled = true);
         try {
           msg.textContent = '영상 받는 중…';
+          fetchVideoBlob.alt = `https://d.fxtwitter.com/i/status/${id}.mp4`;
           const blob = await fetchVideoBlob(q.url, (g, t) => {
             msg.textContent = t ? `영상 받는 중… ${Math.round(g / t * 100)}% (${(g / 1048576).toFixed(1)}MB)` : `영상 받는 중… ${(g / 1048576).toFixed(1)}MB`;
           });
@@ -444,7 +457,12 @@ if ('serviceWorker' in navigator) {
             setTimeout(() => $('editor').scrollIntoView({ behavior: 'smooth', block: 'start' }), 400);
           }
         } catch (err) {
-          msg.innerHTML = `<span class="warn">앱 안에서 바로 받지 못했습니다.</span> <a class="link" href="${esc(q.url)}" target="_blank" rel="noreferrer">영상 열기</a>를 누른 뒤, 열린 화면에서 <b>⋮ → 다운로드</b>로 저장하세요.`;
+          const why = /fetch|network|cors/i.test(err.message) ? '트위터 서버가 앱의 직접 받기를 막았습니다' : err.message;
+          msg.innerHTML = `<span class="warn">앱 안에서 바로 받지 못했습니다 (${esc(why)}).</span>
+            <a class="btn" href="${esc(q.url)}" target="_blank" rel="noreferrer"
+              style="display:block;text-align:center;margin:8px 0;background:var(--accent);border-color:var(--accent);color:#fff;font-weight:700;text-decoration:none">▶ 영상 열어서 저장하기</a>
+            열린 화면에서 <b>⋮ → 다운로드</b>로 저장한 뒤, 아래 <b>폰에 있는 동영상</b>에서 골라 WebP로 바꾸세요.
+            <div style="font-size:12px;opacity:.7;margin-top:4px">(${esc(err.message)})</div>`;
         } finally { btns.forEach(x => x.disabled = false); }
       };
     } catch (err) {
