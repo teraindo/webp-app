@@ -2,52 +2,95 @@ package com.teraindo.renamer
 
 import android.app.Activity
 import android.app.AlertDialog
+import android.content.ContentUris
+import android.content.ContentValues
+import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.Color
 import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
-import android.provider.DocumentsContract
-import android.provider.DocumentsContract.Document
+import android.provider.MediaStore
+import android.provider.Settings
 import android.text.Editable
 import android.text.InputType
 import android.text.TextWatcher
+import android.util.LruCache
+import android.util.Size
 import android.util.TypedValue
+import android.view.Gravity
 import android.view.View
+import android.view.ViewGroup
+import android.widget.AdapterView
+import android.widget.ArrayAdapter
+import android.widget.BaseAdapter
 import android.widget.Button
 import android.widget.EditText
+import android.widget.FrameLayout
+import android.widget.GridView
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.RadioButton
 import android.widget.RadioGroup
 import android.widget.ScrollView
+import android.widget.Spinner
 import android.widget.TextView
 import java.util.Locale
 import java.util.UUID
+import java.util.concurrent.Executors
 import kotlin.concurrent.thread
 import kotlin.random.Random
 
 class MainActivity : Activity() {
 
-    data class Item(val docId: String, val name: String, val modified: Long, val mime: String)
-    data class Job(val docId: String, val oldName: String, val newName: String)
-
-    private val reqPickFolder = 41
-    private val prefsName = "renamer"
-    private val imageExts = setOf(
-        "jpg", "jpeg", "png", "heic", "heif", "webp", "gif", "bmp",
-        "tif", "tiff", "dng", "avif", "raw"
+    data class Photo(
+        val id: Long,
+        val uri: Uri,
+        val name: String,
+        val taken: Long,
+        val bucket: String,
+        val relPath: String
     )
 
+    data class Job(val id: Long, val uri: Uri, val oldName: String, val newName: String)
+
+    private val reqPerm = 11
+    private val reqWrite = 12
+    private val prefsName = "renamer"
+
     private val ui = Handler(Looper.getMainLooper())
-    private var treeUri: Uri? = null
-    private var allItems = listOf<Item>()
-    private var images = listOf<Item>()
+    private val thumbPool = Executors.newFixedThreadPool(4)
+    private val thumbCache = object : LruCache<Long, Bitmap>(24 * 1024 * 1024) {
+        override fun sizeOf(key: Long, value: Bitmap): Int = value.byteCount
+    }
+
+    private var allPhotos = listOf<Photo>()
+    private var shown = listOf<Photo>()
+    private var buckets = listOf<String>()
+    private val selected = LinkedHashSet<Long>()
     private var jobs = listOf<Job>()
     private var busy = false
+    private var loading = false
+    private var pendingWrite: (() -> Unit)? = null
 
-    private lateinit var folderText: TextView
+    // 갤러리 화면
+    private lateinit var galleryScreen: LinearLayout
+    private lateinit var permBox: LinearLayout
+    private lateinit var albumSpinner: Spinner
+    private lateinit var selectAllButton: Button
+    private lateinit var grid: GridView
+    private lateinit var nextButton: Button
+    private val photoAdapter = PhotoAdapter()
+
+    // 설정 화면
+    private lateinit var optionsScreen: ScrollView
     private lateinit var modeGroup: RadioGroup
     private lateinit var uuidBox: LinearLayout
     private lateinit var imgBox: LinearLayout
@@ -67,12 +110,36 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        buildUi()
-        restoreFolder()
-        refreshUndo()
+        buildGallery()
+        buildOptions()
+        val frame = FrameLayout(this)
+        frame.addView(galleryScreen, FrameLayout.LayoutParams(-1, -1))
+        frame.addView(optionsScreen, FrameLayout.LayoutParams(-1, -1))
+        setContentView(frame)
+        showGallery()
+        if (hasReadPermission()) loadPhotos() else askPermission()
     }
 
-    // ---------- 화면 구성 ----------
+    override fun onResume() {
+        super.onResume()
+        if (hasReadPermission() && allPhotos.isEmpty() && !busy && !loading) loadPhotos()
+    }
+
+    override fun onDestroy() {
+        thumbPool.shutdownNow()
+        super.onDestroy()
+    }
+
+    @Deprecated("Deprecated in Java")
+    override fun onBackPressed() {
+        if (optionsScreen.visibility == View.VISIBLE) {
+            if (!busy) showGallery()
+        } else {
+            super.onBackPressed()
+        }
+    }
+
+    // ---------- 공통 ----------
 
     private fun dp(v: Int): Int =
         TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, v.toFloat(), resources.displayMetrics).toInt()
@@ -84,104 +151,376 @@ class MainActivity : Activity() {
         setPadding(0, dp(18), 0, dp(6))
     }
 
-    private fun radios(vararg labels: String, horizontal: Boolean = true): RadioGroup =
-        RadioGroup(this).apply {
-            orientation = if (horizontal) RadioGroup.HORIZONTAL else RadioGroup.VERTICAL
-            labels.forEachIndexed { i, l ->
-                addView(RadioButton(this@MainActivity).apply {
-                    id = View.generateViewId()
-                    text = l
-                    setPadding(0, 0, dp(12), 0)
-                })
-                if (i == 0) this.check(getChildAt(0).id)
-            }
+    private fun label(text: String): TextView = TextView(this).apply {
+        this.text = text
+        setPadding(0, dp(8), 0, 0)
+    }
+
+    private fun radios(vararg labels: String, horizontal: Boolean = true): RadioGroup {
+        val g = RadioGroup(this)
+        g.orientation = if (horizontal) RadioGroup.HORIZONTAL else RadioGroup.VERTICAL
+        labels.forEach { l ->
+            val b = RadioButton(this)
+            b.id = View.generateViewId()
+            b.text = l
+            b.setPadding(0, 0, dp(12), 0)
+            g.addView(b)
         }
+        g.check(g.getChildAt(0).id)
+        return g
+    }
 
     private fun RadioGroup.index(): Int {
         for (i in 0 until childCount) if (getChildAt(i).id == checkedRadioButtonId) return i
         return 0
     }
 
-    private fun buildUi() {
-        val root = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(18), dp(10), dp(18), dp(40))
+    private fun status(s: String) {
+        if (::statusText.isInitialized) statusText.text = s
+    }
+
+    // ---------- 권한 ----------
+
+    private fun granted(p: String) = checkSelfPermission(p) == PackageManager.PERMISSION_GRANTED
+
+    private fun hasReadPermission(): Boolean = when {
+        Build.VERSION.SDK_INT >= 34 ->
+            granted("android.permission.READ_MEDIA_IMAGES") ||
+                granted("android.permission.READ_MEDIA_VISUAL_USER_SELECTED")
+        Build.VERSION.SDK_INT >= 33 -> granted("android.permission.READ_MEDIA_IMAGES")
+        else -> granted("android.permission.READ_EXTERNAL_STORAGE")
+    }
+
+    private fun askPermission() {
+        val perms = when {
+            Build.VERSION.SDK_INT >= 34 -> arrayOf(
+                "android.permission.READ_MEDIA_IMAGES",
+                "android.permission.READ_MEDIA_VISUAL_USER_SELECTED"
+            )
+            Build.VERSION.SDK_INT >= 33 -> arrayOf("android.permission.READ_MEDIA_IMAGES")
+            else -> arrayOf("android.permission.READ_EXTERNAL_STORAGE")
         }
+        requestPermissions(perms, reqPerm)
+    }
 
-        root.addView(header("1. 폴더"))
-        folderText = TextView(this).apply { text = "선택한 폴더가 없습니다." }
-        root.addView(folderText)
-        root.addView(Button(this).apply {
-            text = "폴더 선택"
-            setOnClickListener { pickFolder() }
-        })
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode != reqPerm) return
+        if (hasReadPermission()) loadPhotos() else showPermBox(true)
+    }
 
-        root.addView(header("2. 이름 형식"))
+    private fun showPermBox(show: Boolean) {
+        permBox.visibility = if (show) View.VISIBLE else View.GONE
+        grid.visibility = if (show) View.GONE else View.VISIBLE
+    }
+
+    // ---------- 갤러리 화면 ----------
+
+    private fun buildGallery() {
+        galleryScreen = LinearLayout(this)
+        galleryScreen.orientation = LinearLayout.VERTICAL
+
+        val top = LinearLayout(this)
+        top.orientation = LinearLayout.HORIZONTAL
+        top.gravity = Gravity.CENTER_VERTICAL
+        top.setPadding(dp(8), dp(4), dp(8), dp(4))
+        albumSpinner = Spinner(this)
+        top.addView(albumSpinner, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        selectAllButton = Button(this)
+        selectAllButton.text = "전체 선택"
+        selectAllButton.setOnClickListener { toggleAll() }
+        top.addView(selectAllButton)
+        galleryScreen.addView(top)
+
+        permBox = LinearLayout(this)
+        permBox.orientation = LinearLayout.VERTICAL
+        permBox.setPadding(dp(24), dp(40), dp(24), dp(24))
+        permBox.visibility = View.GONE
+        val permText = TextView(this)
+        permText.text = "사진을 보여 드리려면 사진 접근 권한이 필요합니다."
+        permText.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
+        permBox.addView(permText)
+        val permButton = Button(this)
+        permButton.text = "권한 허용하기"
+        permButton.setOnClickListener { askPermission() }
+        permBox.addView(permButton)
+        val settingsButton = Button(this)
+        settingsButton.text = "설정에서 허용하기"
+        settingsButton.setOnClickListener {
+            startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")))
+        }
+        permBox.addView(settingsButton)
+        galleryScreen.addView(permBox)
+
+        grid = GridView(this)
+        grid.numColumns = 4
+        grid.horizontalSpacing = dp(2)
+        grid.verticalSpacing = dp(2)
+        grid.stretchMode = GridView.STRETCH_COLUMN_WIDTH
+        grid.adapter = photoAdapter
+        grid.setOnItemClickListener { _, _, pos, _ ->
+            val p = shown[pos]
+            if (!selected.remove(p.id)) selected.add(p.id)
+            photoAdapter.notifyDataSetChanged()
+            updateSelectionUi()
+        }
+        galleryScreen.addView(grid, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+
+        nextButton = Button(this)
+        nextButton.text = "사진을 골라 주세요"
+        nextButton.isEnabled = false
+        nextButton.setTypeface(nextButton.typeface, Typeface.BOLD)
+        nextButton.setOnClickListener { showOptions() }
+        galleryScreen.addView(nextButton, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(56)))
+
+        albumSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                applyAlbum()
+            }
+
+            override fun onNothingSelected(parent: AdapterView<*>?) {}
+        }
+    }
+
+    private fun queryPhotos(): List<Photo> {
+        val list = ArrayList<Photo>()
+        val coll = MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)
+        val proj = arrayOf(
+            MediaStore.Images.Media._ID,
+            MediaStore.Images.Media.DISPLAY_NAME,
+            MediaStore.Images.Media.DATE_TAKEN,
+            MediaStore.Images.Media.DATE_MODIFIED,
+            MediaStore.Images.Media.BUCKET_DISPLAY_NAME,
+            MediaStore.Images.Media.RELATIVE_PATH
+        )
+        try {
+            contentResolver.query(coll, proj, null, null, "${MediaStore.Images.Media.DATE_ADDED} DESC")?.use { c ->
+                while (c.moveToNext()) {
+                    val id = c.getLong(0)
+                    val name = c.getString(1) ?: continue
+                    val taken = if (!c.isNull(2) && c.getLong(2) > 0) c.getLong(2) else c.getLong(3) * 1000
+                    val bucket = c.getString(4) ?: "기타"
+                    val rel = c.getString(5) ?: ""
+                    list.add(Photo(id, ContentUris.withAppendedId(coll, id), name, taken, bucket, rel))
+                }
+            }
+        } catch (_: Exception) {
+        }
+        return list
+    }
+
+    private fun loadPhotos(after: (() -> Unit)? = null) {
+        showPermBox(false)
+        loading = true
+        thread {
+            val list = queryPhotos()
+            ui.post {
+                loading = false
+                allPhotos = list
+                selected.retainAll(list.map { it.id }.toSet())
+
+                val counts = list.groupingBy { it.bucket }.eachCount()
+                val names = counts.keys.sortedWith { a, b ->
+                    val pa = if (a == "Camera") 0 else 1
+                    val pb = if (b == "Camera") 0 else 1
+                    if (pa != pb) pa - pb else a.compareTo(b)
+                }
+                val prev = buckets.getOrNull(albumSpinner.selectedItemPosition - 1)
+                buckets = names
+                val labels = listOf("최근 사진 (${list.size})") + names.map { "$it (${counts[it]})" }
+                albumSpinner.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, labels)
+                val idx = if (prev == null) -1 else names.indexOf(prev)
+                albumSpinner.setSelection(if (idx >= 0) idx + 1 else 0)
+                applyAlbum()
+                after?.invoke()
+            }
+        }
+    }
+
+    private fun applyAlbum() {
+        val pos = albumSpinner.selectedItemPosition
+        shown = if (pos <= 0) {
+            allPhotos
+        } else {
+            val b = buckets.getOrNull(pos - 1)
+            allPhotos.filter { it.bucket == b }
+        }
+        photoAdapter.notifyDataSetChanged()
+        updateSelectionUi()
+    }
+
+    private fun toggleAll() {
+        val ids = shown.map { it.id }
+        if (ids.isNotEmpty() && selected.containsAll(ids)) selected.removeAll(ids.toSet())
+        else selected.addAll(ids)
+        photoAdapter.notifyDataSetChanged()
+        updateSelectionUi()
+    }
+
+    private fun updateSelectionUi() {
+        val ids = shown.map { it.id }
+        selectAllButton.text = if (ids.isNotEmpty() && selected.containsAll(ids)) "선택 해제" else "전체 선택"
+        nextButton.isEnabled = selected.isNotEmpty()
+        nextButton.text = if (selected.isEmpty()) "사진을 골라 주세요" else "다음 (${selected.size}장)"
+    }
+
+    private class SquareFrame(ctx: Context) : FrameLayout(ctx) {
+        override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+            super.onMeasure(widthMeasureSpec, widthMeasureSpec)
+        }
+    }
+
+    private fun newCell(): SquareFrame {
+        val cell = SquareFrame(this)
+        val img = ImageView(this)
+        img.scaleType = ImageView.ScaleType.CENTER_CROP
+        img.setBackgroundColor(Color.parseColor("#33888888"))
+        cell.addView(img, FrameLayout.LayoutParams(-1, -1))
+        val dim = View(this)
+        dim.setBackgroundColor(Color.parseColor("#662F6FDE"))
+        cell.addView(dim, FrameLayout.LayoutParams(-1, -1))
+        val badge = TextView(this)
+        badge.gravity = Gravity.CENTER
+        badge.setTextColor(Color.WHITE)
+        badge.setTypeface(badge.typeface, Typeface.BOLD)
+        badge.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+        val circle = GradientDrawable()
+        circle.shape = GradientDrawable.OVAL
+        circle.setColor(Color.parseColor("#2F6FDE"))
+        circle.setStroke(dp(2), Color.WHITE)
+        badge.background = circle
+        val lp = FrameLayout.LayoutParams(dp(26), dp(26), Gravity.TOP or Gravity.END)
+        lp.setMargins(0, dp(4), dp(4), 0)
+        cell.addView(badge, lp)
+        return cell
+    }
+
+    private inner class PhotoAdapter : BaseAdapter() {
+        override fun getCount(): Int = shown.size
+        override fun getItem(position: Int): Any = shown[position]
+        override fun getItemId(position: Int): Long = shown[position].id
+
+        override fun getView(position: Int, convertView: View?, parent: ViewGroup?): View {
+            val cell = (convertView as? SquareFrame) ?: newCell()
+            val img = cell.getChildAt(0) as ImageView
+            val dim = cell.getChildAt(1)
+            val badge = cell.getChildAt(2) as TextView
+            val p = shown[position]
+
+            val order = if (p.id in selected) selected.indexOf(p.id) + 1 else 0
+            dim.visibility = if (order > 0) View.VISIBLE else View.GONE
+            badge.visibility = if (order > 0) View.VISIBLE else View.GONE
+            badge.text = if (order > 0) order.toString() else ""
+
+            img.tag = p.id
+            val cached = thumbCache.get(p.id)
+            if (cached != null) {
+                img.setImageBitmap(cached)
+            } else {
+                img.setImageDrawable(null)
+                val px = dp(110)
+                val uri = p.uri
+                val id = p.id
+                thumbPool.execute {
+                    val bmp: Bitmap? = try {
+                        contentResolver.loadThumbnail(uri, Size(px, px), null)
+                    } catch (_: Exception) {
+                        null
+                    }
+                    if (bmp != null) {
+                        thumbCache.put(id, bmp)
+                        ui.post { if (img.tag == id) img.setImageBitmap(bmp) }
+                    }
+                }
+            }
+            return cell
+        }
+    }
+
+    // ---------- 설정 화면 ----------
+
+    private fun buildOptions() {
+        val root = LinearLayout(this)
+        root.orientation = LinearLayout.VERTICAL
+        root.setPadding(dp(18), dp(6), dp(18), dp(40))
+
+        val back = Button(this)
+        back.text = "← 사진 다시 고르기"
+        back.setOnClickListener { if (!busy) showGallery() }
+        root.addView(back)
+
+        root.addView(header("이름 형식"))
         modeGroup = radios("UUID", "IMG_1234")
         root.addView(modeGroup)
 
-        uuidBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        uuidBox.addView(TextView(this).apply { text = "대소문자"; setPadding(0, dp(8), 0, 0) })
+        uuidBox = LinearLayout(this)
+        uuidBox.orientation = LinearLayout.VERTICAL
+        uuidBox.addView(label("대소문자"))
         caseGroup = radios("대문자 (E621B27A-…)", "소문자 (e621b27a-…)", horizontal = false)
         uuidBox.addView(caseGroup)
         root.addView(uuidBox)
 
-        imgBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; visibility = View.GONE }
-        imgBox.addView(TextView(this).apply { text = "앞 글자"; setPadding(0, dp(8), 0, 0) })
-        prefixEdit = EditText(this).apply { setText("IMG_"); isSingleLine = true }
+        imgBox = LinearLayout(this)
+        imgBox.orientation = LinearLayout.VERTICAL
+        imgBox.visibility = View.GONE
+        imgBox.addView(label("앞 글자"))
+        prefixEdit = EditText(this)
+        prefixEdit.setText("IMG_")
+        prefixEdit.isSingleLine = true
         imgBox.addView(prefixEdit)
-        imgBox.addView(TextView(this).apply { text = "시작 번호" })
-        startEdit = EditText(this).apply { setText("1"); inputType = InputType.TYPE_CLASS_NUMBER }
+        imgBox.addView(label("시작 번호"))
+        startEdit = EditText(this)
+        startEdit.setText("1")
+        startEdit.inputType = InputType.TYPE_CLASS_NUMBER
         imgBox.addView(startEdit)
-        imgBox.addView(TextView(this).apply { text = "번호 방식" })
+        imgBox.addView(label("번호 방식"))
         numGroup = radios("순서대로", "무작위")
         imgBox.addView(numGroup)
-        imgBox.addView(TextView(this).apply { text = "순서 기준"; setPadding(0, dp(8), 0, 0) })
-        sortGroup = radios("파일 이름", "찍은(수정) 날짜")
+        imgBox.addView(label("순서 기준"))
+        sortGroup = radios("고른 순서", "찍은 날짜", "파일 이름", horizontal = false)
         imgBox.addView(sortGroup)
         root.addView(imgBox)
 
-        root.addView(TextView(this).apply { text = "확장자"; setPadding(0, dp(10), 0, 0) })
+        root.addView(label("확장자"))
         extGroup = radios("원래대로", ".JPG", ".jpg")
         root.addView(extGroup)
 
-        root.addView(header("3. 미리보기"))
+        root.addView(header("미리보기"))
         previewTitle = TextView(this)
         root.addView(previewTitle)
-        previewText = TextView(this).apply {
-            typeface = Typeface.MONOSPACE
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-            setPadding(0, dp(6), 0, dp(6))
-        }
+        previewText = TextView(this)
+        previewText.typeface = Typeface.MONOSPACE
+        previewText.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+        previewText.setPadding(0, dp(6), 0, dp(6))
         root.addView(previewText)
-        rerollButton = Button(this).apply {
-            text = "이름 다시 만들기"
-            setOnClickListener { rebuild() }
-        }
+
+        rerollButton = Button(this)
+        rerollButton.text = "이름 다시 만들기"
+        rerollButton.setOnClickListener { rebuild() }
         root.addView(rerollButton)
 
-        progress = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
-            visibility = View.GONE
-        }
+        progress = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal)
+        progress.visibility = View.GONE
         root.addView(progress)
 
-        runButton = Button(this).apply {
-            text = "이름 바꾸기 실행"
-            setTypeface(typeface, Typeface.BOLD)
-            setOnClickListener { confirmRun() }
-        }
+        runButton = Button(this)
+        runButton.text = "이름 바꾸기 실행"
+        runButton.setTypeface(runButton.typeface, Typeface.BOLD)
+        runButton.setOnClickListener { confirmRun() }
         root.addView(runButton)
 
-        undoButton = Button(this).apply {
-            text = "마지막 작업 되돌리기"
-            setOnClickListener { confirmUndo() }
-        }
+        undoButton = Button(this)
+        undoButton.text = "마지막 작업 되돌리기"
+        undoButton.visibility = View.GONE
+        undoButton.setOnClickListener { confirmUndo() }
         root.addView(undoButton)
 
-        statusText = TextView(this).apply { setPadding(0, dp(10), 0, 0) }
+        statusText = TextView(this)
+        statusText.setPadding(0, dp(10), 0, 0)
         root.addView(statusText)
 
-        setContentView(ScrollView(this).apply { addView(root) })
+        optionsScreen = ScrollView(this)
+        optionsScreen.addView(root)
 
         val onChange = RadioGroup.OnCheckedChangeListener { _, _ -> onOptionsChanged() }
         modeGroup.setOnCheckedChangeListener(onChange)
@@ -192,12 +531,30 @@ class MainActivity : Activity() {
         val watcher = object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
             override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
-            override fun afterTextChanged(s: Editable?) { rebuild() }
+            override fun afterTextChanged(s: Editable?) {
+                rebuild()
+            }
         }
         prefixEdit.addTextChangedListener(watcher)
         startEdit.addTextChangedListener(watcher)
+    }
 
+    private fun showGallery() {
+        optionsScreen.visibility = View.GONE
+        galleryScreen.visibility = View.VISIBLE
+        title = getString(R.string.app_name)
+        photoAdapter.notifyDataSetChanged()
+        updateSelectionUi()
+    }
+
+    private fun showOptions() {
+        if (selected.isEmpty()) return
+        galleryScreen.visibility = View.GONE
+        optionsScreen.visibility = View.VISIBLE
+        title = "사진 ${selected.size}장 이름 바꾸기"
+        status("")
         rebuild()
+        refreshUndo()
     }
 
     private fun onOptionsChanged() {
@@ -207,107 +564,6 @@ class MainActivity : Activity() {
         rebuild()
     }
 
-    // ---------- 폴더 ----------
-
-    private fun pickFolder() {
-        val i = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
-            addFlags(
-                Intent.FLAG_GRANT_READ_URI_PERMISSION or
-                    Intent.FLAG_GRANT_WRITE_URI_PERMISSION or
-                    Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION
-            )
-        }
-        try {
-            startActivityForResult(i, reqPickFolder)
-        } catch (e: Exception) {
-            status("폴더 선택 화면을 열 수 없습니다: ${e.message}")
-        }
-    }
-
-    @Deprecated("Deprecated in Java")
-    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode != reqPickFolder || resultCode != RESULT_OK) return
-        val uri = data?.data ?: return
-        try {
-            contentResolver.takePersistableUriPermission(
-                uri,
-                Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
-            )
-        } catch (_: Exception) {
-        }
-        getSharedPreferences(prefsName, MODE_PRIVATE).edit().putString("tree", uri.toString()).apply()
-        treeUri = uri
-        loadFolder()
-    }
-
-    private fun restoreFolder() {
-        val s = getSharedPreferences(prefsName, MODE_PRIVATE).getString("tree", null) ?: return
-        val uri = Uri.parse(s)
-        val ok = contentResolver.persistedUriPermissions.any { it.uri == uri && it.isWritePermission }
-        if (!ok) return
-        treeUri = uri
-        loadFolder()
-    }
-
-    private fun folderLabel(uri: Uri): String {
-        val id = try { DocumentsContract.getTreeDocumentId(uri) } catch (_: Exception) { return uri.toString() }
-        val path = id.substringAfter(':', id)
-        val vol = id.substringBefore(':', "")
-        val volName = if (vol == "primary") "내장 저장공간" else vol
-        return if (path.isEmpty()) volName else "$volName / $path"
-    }
-
-    private fun queryChildren(tree: Uri): List<Item> {
-        val parentId = DocumentsContract.getTreeDocumentId(tree)
-        val children = DocumentsContract.buildChildDocumentsUriUsingTree(tree, parentId)
-        val out = ArrayList<Item>()
-        contentResolver.query(
-            children,
-            arrayOf(
-                Document.COLUMN_DOCUMENT_ID,
-                Document.COLUMN_DISPLAY_NAME,
-                Document.COLUMN_LAST_MODIFIED,
-                Document.COLUMN_MIME_TYPE
-            ),
-            null, null, null
-        )?.use { c ->
-            while (c.moveToNext()) {
-                val id = c.getString(0) ?: continue
-                val name = c.getString(1) ?: continue
-                val mod = if (c.isNull(2)) 0L else c.getLong(2)
-                val mime = c.getString(3) ?: ""
-                if (mime == Document.MIME_TYPE_DIR) continue
-                out.add(Item(id, name, mod, mime))
-            }
-        }
-        return out
-    }
-
-    private fun isImage(it: Item): Boolean =
-        it.mime.startsWith("image/") || extOf(it.name).lowercase(Locale.ROOT) in imageExts
-
-    private fun loadFolder() {
-        val tree = treeUri ?: return
-        folderText.text = folderLabel(tree)
-        refreshUndo()
-        status("사진을 읽는 중…")
-        thread {
-            val result = try { queryChildren(tree) } catch (e: Exception) { null }
-            ui.post {
-                if (result == null) {
-                    status("폴더를 읽지 못했습니다. 폴더를 다시 선택해 주세요.")
-                    allItems = emptyList(); images = emptyList()
-                } else {
-                    allItems = result
-                    images = result.filter { isImage(it) }
-                    status("")
-                }
-                rebuild()
-            }
-        }
-    }
-
     // ---------- 이름 만들기 ----------
 
     private fun extOf(name: String): String {
@@ -315,21 +571,20 @@ class MainActivity : Activity() {
         return if (i > 0 && i < name.length - 1) name.substring(i + 1) else ""
     }
 
-    private fun baseOf(name: String): String {
-        val i = name.lastIndexOf('.')
-        return if (i > 0) name.substring(0, i) else name
-    }
-
     private fun naturalCompare(a: String, b: String): Int {
         val re = Regex("\\d+|\\D+")
         val pa = re.findAll(a.lowercase(Locale.ROOT)).map { it.value }.toList()
         val pb = re.findAll(b.lowercase(Locale.ROOT)).map { it.value }.toList()
         for (i in 0 until minOf(pa.size, pb.size)) {
-            val x = pa[i]; val y = pb[i]
+            val x = pa[i]
+            val y = pb[i]
             val c = if (x[0].isDigit() && y[0].isDigit()) {
-                val nx = x.trimStart('0'); val ny = y.trimStart('0')
+                val nx = x.trimStart('0')
+                val ny = y.trimStart('0')
                 if (nx.length != ny.length) nx.length - ny.length else nx.compareTo(ny)
-            } else x.compareTo(y)
+            } else {
+                x.compareTo(y)
+            }
             if (c != 0) return c
         }
         return pa.size - pb.size
@@ -347,18 +602,25 @@ class MainActivity : Activity() {
 
     private fun rebuild() {
         if (!::statusText.isInitialized) return
+        val byId = allPhotos.associateBy { it.id }
+        val picked = selected.mapNotNull { byId[it] }
         val uuidMode = modeGroup.index() == 0
         val ordered = if (uuidMode) {
-            images.sortedWith { a, b -> naturalCompare(a.name, b.name) }
-        } else if (sortGroup.index() == 1) {
-            images.sortedBy { it.modified }
+            picked
         } else {
-            images.sortedWith { a, b -> naturalCompare(a.name, b.name) }
+            when (sortGroup.index()) {
+                1 -> picked.sortedBy { it.taken }
+                2 -> picked.sortedWith { a, b -> naturalCompare(a.name, b.name) }
+                else -> picked
+            }
         }
 
-        val selectedIds = ordered.map { it.docId }.toSet()
+        // 같은 폴더 안의 다른 사진과 이름이 겹치지 않게
+        val pickedIds = picked.map { it.id }.toSet()
         val taken = HashSet<String>()
-        allItems.filter { it.docId !in selectedIds }.forEach { taken.add(it.name.lowercase(Locale.ROOT)) }
+        allPhotos.filter { it.id !in pickedIds }.forEach {
+            taken.add((it.relPath + "/" + it.name).lowercase(Locale.ROOT))
+        }
 
         val prefix = prefixEdit.text.toString()
         val start = startEdit.text.toString().toIntOrNull()?.coerceAtLeast(0) ?: 0
@@ -366,14 +628,16 @@ class MainActivity : Activity() {
         val usedNums = HashSet<Int>()
 
         val list = ArrayList<Job>()
-        ordered.forEachIndexed { k, item ->
-            val ext = formatExt(extOf(item.name))
+        ordered.forEachIndexed { k, p ->
+            val ext = formatExt(extOf(p.name))
             val base = if (uuidMode) {
                 val u = UUID.randomUUID().toString()
                 if (caseGroup.index() == 0) u.uppercase(Locale.ROOT) else u.lowercase(Locale.ROOT)
             } else if (randomNum) {
                 var n: Int
-                do { n = Random.nextInt(10000) } while (n in usedNums && usedNums.size < 10000)
+                do {
+                    n = Random.nextInt(10000)
+                } while (n in usedNums && usedNums.size < 10000)
                 usedNums.add(n)
                 prefix + n.toString().padStart(4, '0')
             } else {
@@ -381,27 +645,24 @@ class MainActivity : Activity() {
             }
             var name = base + ext
             var dup = 1
-            while (name.lowercase(Locale.ROOT) in taken) {
-                name = base + "_" + dup++ + ext
+            while ((p.relPath + "/" + name).lowercase(Locale.ROOT) in taken) {
+                name = base + "_" + dup + ext
+                dup++
             }
-            taken.add(name.lowercase(Locale.ROOT))
-            list.add(Job(item.docId, item.name, name))
+            taken.add((p.relPath + "/" + name).lowercase(Locale.ROOT))
+            list.add(Job(p.id, p.uri, p.name, name))
         }
         jobs = list
 
-        if (treeUri == null) {
-            previewTitle.text = "폴더를 먼저 선택해 주세요."
-            previewText.text = ""
-        } else if (jobs.isEmpty()) {
-            previewTitle.text = "이 폴더에는 사진이 없습니다."
+        if (jobs.isEmpty()) {
+            previewTitle.text = "고른 사진이 없습니다."
             previewText.text = ""
         } else {
             previewTitle.text = "사진 ${jobs.size}장"
-            val shown = jobs.take(150).joinToString("\n") { "${it.oldName}\n  → ${it.newName}" }
-            previewText.text = if (jobs.size > 150) "$shown\n…외 ${jobs.size - 150}장" else shown
+            val head = jobs.take(150).joinToString("\n") { "${it.oldName}\n  → ${it.newName}" }
+            previewText.text = if (jobs.size > 150) "$head\n…외 ${jobs.size - 150}장" else head
         }
-        val randomish = uuidMode || randomNum
-        rerollButton.visibility = if (randomish && jobs.isNotEmpty()) View.VISIBLE else View.GONE
+        rerollButton.visibility = if ((uuidMode || randomNum) && jobs.isNotEmpty()) View.VISIBLE else View.GONE
         runButton.isEnabled = jobs.isNotEmpty() && !busy
     }
 
@@ -409,26 +670,58 @@ class MainActivity : Activity() {
 
     private fun confirmRun() {
         if (jobs.isEmpty() || busy) return
+        val todo = jobs
         AlertDialog.Builder(this)
             .setTitle("이름 바꾸기")
-            .setMessage("사진 ${jobs.size}장의 파일 이름을 바꿉니다.\n'마지막 작업 되돌리기'로 원래 이름으로 돌릴 수 있습니다.")
-            .setPositiveButton("실행") { _, _ -> runJobs(jobs, saveUndo = true) }
+            .setMessage(
+                "사진 ${todo.size}장의 파일 이름을 바꿉니다.\n" +
+                    "다음에 뜨는 창에서 '허용'을 눌러 주세요.\n" +
+                    "'마지막 작업 되돌리기'로 원래 이름으로 돌릴 수 있습니다."
+            )
+            .setPositiveButton("실행") { _, _ ->
+                withWriteAccess(todo.map { it.uri }) { runJobs(todo, saveUndo = true) }
+            }
             .setNegativeButton("취소", null)
             .show()
     }
 
-    private fun displayName(uri: Uri): String? = try {
-        contentResolver.query(uri, arrayOf(Document.COLUMN_DISPLAY_NAME), null, null, null)?.use { c ->
+    private fun withWriteAccess(uris: List<Uri>, action: () -> Unit) {
+        try {
+            val pi = MediaStore.createWriteRequest(contentResolver, uris)
+            pendingWrite = action
+            startIntentSenderForResult(pi.intentSender, reqWrite, null, 0, 0, 0)
+        } catch (e: Exception) {
+            pendingWrite = null
+            status("수정 권한을 요청하지 못했습니다: ${e.message}")
+        }
+    }
+
+    @Deprecated("Deprecated in Java")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != reqWrite) return
+        val action = pendingWrite
+        pendingWrite = null
+        if (resultCode == RESULT_OK && action != null) action() else status("허용하지 않아서 취소했습니다.")
+    }
+
+    private fun nameOf(uri: Uri): String? = try {
+        contentResolver.query(uri, arrayOf(MediaStore.MediaColumns.DISPLAY_NAME), null, null, null)?.use { c ->
             if (c.moveToFirst()) c.getString(0) else null
         }
-    } catch (_: Exception) { null }
+    } catch (_: Exception) {
+        null
+    }
 
-    private fun rename(uri: Uri, name: String): Uri? = try {
-        DocumentsContract.renameDocument(contentResolver, uri, name)
-    } catch (_: Exception) { null }
+    private fun setName(uri: Uri, name: String): Boolean = try {
+        val cv = ContentValues()
+        cv.put(MediaStore.MediaColumns.DISPLAY_NAME, name)
+        contentResolver.update(uri, cv, null, null) > 0
+    } catch (_: Exception) {
+        false
+    }
 
     private fun runJobs(todo: List<Job>, saveUndo: Boolean) {
-        val tree = treeUri ?: return
         busy = true
         runButton.isEnabled = false
         undoButton.isEnabled = false
@@ -439,79 +732,72 @@ class MainActivity : Activity() {
 
         thread {
             val failed = ArrayList<String>()
-            val undo = ArrayList<Pair<String, String>>() // 현재 이름 → 원래 이름
+            val undo = ArrayList<String>() // id \t 원래 이름
             var step = 0
 
-            // 1단계: 이름이 겹치지 않도록 임시 이름으로 바꿈
-            val staged = ArrayList<Pair<Uri, Job>>()
+            // 1단계: 서로 이름이 겹치지 않도록 임시 이름으로
+            val staged = ArrayList<Job>()
             for (j in todo) {
-                val uri = DocumentsContract.buildDocumentUriUsingTree(tree, j.docId)
                 val ext = extOf(j.oldName)
                 val tmp = "rn_tmp_" + UUID.randomUUID().toString().replace("-", "") +
                     (if (ext.isEmpty()) "" else ".$ext")
-                val r = rename(uri, tmp)
-                if (r == null) failed.add(j.oldName) else staged.add(r to j)
+                if (setName(j.uri, tmp)) staged.add(j) else failed.add(j.oldName)
                 step++
                 val s = step
                 ui.post { progress.progress = s }
             }
 
-            // 2단계: 최종 이름으로 바꿈
-            for ((uri, j) in staged) {
-                val r = rename(uri, j.newName)
-                if (r == null) {
-                    rename(uri, j.oldName) // 실패하면 원래 이름으로 복구
-                    failed.add(j.oldName)
+            // 2단계: 최종 이름으로
+            for (j in staged) {
+                if (setName(j.uri, j.newName)) {
+                    undo.add("${j.id}\t${j.oldName}")
                 } else {
-                    val actual = displayName(r) ?: j.newName
-                    undo.add(actual to j.oldName)
+                    setName(j.uri, j.oldName) // 실패하면 원래 이름으로 복구
+                    failed.add(j.oldName)
                 }
                 step++
                 val s = step
                 ui.post { progress.progress = s }
             }
 
-            if (saveUndo && undo.isNotEmpty()) {
-                val text = undo.joinToString("\n") { "${it.first}\t${it.second}" }
-                getSharedPreferences(prefsName, MODE_PRIVATE).edit()
-                    .putString("undo", text)
-                    .putString("undoTree", tree.toString())
-                    .apply()
-            } else if (!saveUndo) {
-                getSharedPreferences(prefsName, MODE_PRIVATE).edit()
-                    .remove("undo").remove("undoTree").apply()
-            }
+            val prefs = getSharedPreferences(prefsName, MODE_PRIVATE).edit()
+            if (saveUndo && undo.isNotEmpty()) prefs.putString("undo", undo.joinToString("\n"))
+            else if (!saveUndo) prefs.remove("undo")
+            prefs.apply()
 
             ui.post {
-                busy = false
-                progress.visibility = View.GONE
                 val ok = todo.size - failed.size
                 val head = if (saveUndo) "${ok}장의 이름을 바꿨습니다." else "${ok}장을 원래 이름으로 되돌렸습니다."
-                status(
-                    if (failed.isEmpty()) head
-                    else "$head\n바꾸지 못한 파일 ${failed.size}개:\n" + failed.take(20).joinToString("\n")
-                )
-                refreshUndo()
-                loadFolder()
+                val msg = if (failed.isEmpty()) {
+                    head
+                } else {
+                    "$head\n바꾸지 못한 사진 ${failed.size}장:\n" + failed.take(20).joinToString("\n")
+                }
+                loadPhotos {
+                    busy = false
+                    progress.visibility = View.GONE
+                    rebuild()
+                    refreshUndo()
+                    status(msg)
+                }
             }
         }
     }
 
     // ---------- 되돌리기 ----------
 
-    private fun readUndo(): List<Pair<String, String>> {
-        val p = getSharedPreferences(prefsName, MODE_PRIVATE)
-        val text = p.getString("undo", null) ?: return emptyList()
+    private fun readUndo(): List<Pair<Long, String>> {
+        val text = getSharedPreferences(prefsName, MODE_PRIVATE).getString("undo", null) ?: return emptyList()
         return text.split("\n").mapNotNull {
             val parts = it.split("\t")
-            if (parts.size == 2) parts[0] to parts[1] else null
+            val id = parts.getOrNull(0)?.toLongOrNull()
+            if (parts.size == 2 && id != null) id to parts[1] else null
         }
     }
 
     private fun refreshUndo() {
-        val p = getSharedPreferences(prefsName, MODE_PRIVATE)
-        val has = readUndo().isNotEmpty() && p.getString("undoTree", null) == treeUri?.toString()
-        undoButton.visibility = if (has) View.VISIBLE else View.GONE
+        if (!::undoButton.isInitialized) return
+        undoButton.visibility = if (readUndo().isNotEmpty()) View.VISIBLE else View.GONE
         undoButton.isEnabled = !busy
     }
 
@@ -522,18 +808,19 @@ class MainActivity : Activity() {
             .setTitle("되돌리기")
             .setMessage("마지막으로 바꾼 사진 ${pairs.size}장을 원래 이름으로 되돌립니다.")
             .setPositiveButton("되돌리기") { _, _ ->
-                val byName = allItems.associateBy { it.name }
-                val todo = pairs.mapNotNull { (cur, orig) ->
-                    byName[cur]?.let { Job(it.docId, cur, orig) }
+                val coll = MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)
+                val todo = pairs.mapNotNull { (id, orig) ->
+                    val uri = ContentUris.withAppendedId(coll, id)
+                    val cur = nameOf(uri)
+                    if (cur == null) null else Job(id, uri, cur, orig)
                 }
-                if (todo.isEmpty()) status("되돌릴 파일을 찾지 못했습니다.")
-                else runJobs(todo, saveUndo = false)
+                if (todo.isEmpty()) {
+                    status("되돌릴 사진을 찾지 못했습니다.")
+                } else {
+                    withWriteAccess(todo.map { it.uri }) { runJobs(todo, saveUndo = false) }
+                }
             }
             .setNegativeButton("취소", null)
             .show()
-    }
-
-    private fun status(s: String) {
-        statusText.text = s
     }
 }
