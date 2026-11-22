@@ -750,13 +750,13 @@ if ('serviceWorker' in navigator) {
     if (o.fps === 0) return srcFps || 30;
     return srcFps ? Math.min(o.fps, srcFps) : o.fps;
   }
-  function frameCount(o) { return Math.max(1, Math.floor((end - start) * effFps(o) / o.speed + 1e-6)); }
+  function frameCount(o) { return Math.max(1, Math.ceil((end - start) * effFps(o) / o.speed - 1e-6)); }
   function updateEstimate() {
     if (!dur) return;
     const o = opts(), n = frameCount(o), s = outSize(o), f = effFps(o);
     let total = n; if (o.boomerang && n > 2) total = n * 2 - 2;
     const outDur = total / f;
-    let txt = `${s.w}×${s.h} · ${(+f.toFixed(2))}fps · 프레임 약 ${total}개 · 재생 길이 약 ${outDur.toFixed(1)}초`;
+    let txt = `${s.w}×${s.h} · ${(+f.toFixed(2))}fps · 프레임 ${total}개 · 재생 길이 약 ${outDur.toFixed(1)}초`;
     txt += srcFps ? `<br>원본 영상: ${(+srcFps.toFixed(2))}fps` : (fpsDetecting ? '<br>원본 FPS 확인 중…' : '');
     if (srcFps && o.fps > srcFps) txt += ` <span class="warn">· 원본보다 높은 FPS는 원본(${(+srcFps.toFixed(2))}fps)으로 맞춥니다</span>`;
     if (total > 450) txt += ' <span class="warn">· 프레임이 많아 오래 걸리고 용량이 커질 수 있습니다</span>';
@@ -1057,7 +1057,7 @@ if ('serviceWorker' in navigator) {
         try {
           frames = await convertExact(mp4Meta, o, w, h, ctx, canvas, fpsOut, k => {
             $('bar').style.width = Math.min(95, k / n * 95) + '%';
-            $('progTxt').textContent = `프레임 처리 중… ${k} / 약 ${n}`;
+            $('progTxt').textContent = `프레임 처리 중… ${k} / ${n}`;
           });
           exactOK = frames.length > 0;
         } catch (e) {
