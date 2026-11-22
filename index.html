@@ -269,9 +269,8 @@ if ('serviceWorker' in navigator) {
 
   // 원본 영상의 FPS를 실제 재생 프레임 간격으로 측정
   async function detectFps(url, t0) {
-    const v = document.createElement('video');
-    v.muted = true; v.playsInline = true; v.preload = 'auto'; v.src = url;
-    if (!('requestVideoFrameCallback' in v)) return null;
+    const v = hiddenVideo(url);
+    if (!('requestVideoFrameCallback' in v)) { dropVideo(v); return null; }
     try {
       await new Promise((res, rej) => {
         v.addEventListener('loadeddata', res, { once: true });
@@ -294,7 +293,7 @@ if ('serviceWorker' in navigator) {
       for (let i = 1; i < times.length; i++) { const x = times[i] - times[i - 1]; if (x > 0.004 && x < 0.5) d.push(x); }
       if (d.length < 5) return null;
       d.sort((a, b) => a - b);
-      const q = d[Math.floor(d.length * 0.3)]; // 렌더링에서 빠진 프레임(간격 2배)은 무시
+      const q = d[Math.floor(d.length * 0.1)]; // 재생 중 빠진 프레임(간격 2배 이상)은 무시하고 가장 짧은 간격 기준
       let fps = 1 / q;
       const common = [10, 12, 15, 20, 23.976, 24, 25, 29.97, 30, 48, 50, 59.94, 60, 90, 120];
       let best = null;
@@ -302,7 +301,7 @@ if ('serviceWorker' in navigator) {
       fps = best || Math.round(fps);
       return fps >= 1 && fps <= 240 ? fps : null;
     } catch (e) { return null; }
-    finally { v.pause(); v.removeAttribute('src'); v.load(); }
+    finally { dropVideo(v); }
   }
 
   // ---- 지원 확인 ----
@@ -799,12 +798,29 @@ if ('serviceWorker' in navigator) {
   }
 
   // ---- 변환 ----
+  // 화면 밖에 붙여 두는 작업용 비디오 (안드로이드는 화면에 붙어 있어야 새 프레임을 제때 그려 줌)
+  function hiddenVideo(url) {
+    const v = document.createElement('video');
+    v.muted = true; v.playsInline = true; v.preload = 'auto';
+    v.style.cssText = 'position:fixed;left:-10px;top:-10px;width:2px;height:2px;opacity:0;pointer-events:none';
+    document.body.appendChild(v);
+    v.src = url;
+    return v;
+  }
+  function dropVideo(v) { try { v.pause(); v.removeAttribute('src'); v.load(); v.remove(); } catch (e) {} }
+  // 이동 후 '실제로 새 프레임이 준비될 때까지' 기다림. seeked 직후에 그리면 이전 프레임이 잡혀 프레임이 빠지는 문제 방지
   function seekTo(v, t) {
     return new Promise(res => {
-      let done = false;
-      const fin = () => { if (done) return; done = true; v.removeEventListener('seeked', fin); clearTimeout(to); res(); };
-      const to = setTimeout(fin, 4000);
-      v.addEventListener('seeked', fin);
+      let done = false, to = null, to2 = null;
+      const fin = () => { if (done) return; done = true; v.removeEventListener('seeked', onSeeked); clearTimeout(to); clearTimeout(to2); res(); };
+      const onSeeked = () => {
+        if ('requestVideoFrameCallback' in v) {
+          v.requestVideoFrameCallback(() => fin());
+          to2 = setTimeout(fin, 250); // 같은 프레임이면 콜백이 안 올 수 있음
+        } else requestAnimationFrame(() => requestAnimationFrame(fin));
+      };
+      to = setTimeout(fin, 5000);
+      v.addEventListener('seeked', onSeeked);
       v.currentTime = t;
     });
   }
@@ -828,8 +844,7 @@ if ('serviceWorker' in navigator) {
     ctx.imageSmoothingQuality = 'high';
 
     // 변환 전용 비디오 (미리보기와 분리)
-    const pv = document.createElement('video');
-    pv.muted = true; pv.playsInline = true; pv.preload = 'auto'; pv.src = srcURL;
+    const pv = hiddenVideo(srcURL);
     try {
       await new Promise((res, rej) => {
         if (pv.readyState >= 2) return res();
@@ -880,7 +895,7 @@ if ('serviceWorker' in navigator) {
       if (err.message === 'cancel') { $('progTxt').textContent = '취소했습니다.'; }
       else { $('progTxt').innerHTML = '<span class="err">오류: ' + err.message + '</span>'; }
     } finally {
-      pv.removeAttribute('src'); pv.load();
+      dropVideo(pv);
       busy = false; $('convertBtn').disabled = false;
       setTimeout(() => { if (!busy) $('progressWrap').classList.add('hidden'); }, 2500);
     }
