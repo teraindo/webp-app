@@ -244,6 +244,7 @@
 </main>
 <div id="toast" class="toast hidden"></div>
 
+<script src="mp4box.all.min.js"></script>
 <script>
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(() => {}));
@@ -323,6 +324,7 @@ if ('serviceWorker' in navigator) {
     $('fileInfo').textContent = `${name} · ${(f.size / 1048576).toFixed(1)}MB`;
     $('fileInfo').classList.remove('hidden');
     video.src = srcURL;
+    startMeta(f);
     video.load();
     $('result').classList.add('hidden');
   }
@@ -519,12 +521,13 @@ if ('serviceWorker' in navigator) {
     $('durTime').textContent = '/ ' + fmt(dur);
     $('editor').classList.remove('hidden');
     $('settings').classList.remove('hidden');
-    srcFps = null; fpsDetecting = true;
+    srcFps = mp4Meta ? snapFps(mp4Meta.fps) : null; fpsDetecting = true;
     syncUI();
     const tok = ++detectToken;
     fpsPromise = detectFps(srcURL, Math.min(dur * 0.3, Math.max(0, dur - 2))).then(f => {
       if (tok !== detectToken) return;
-      srcFps = f; fpsDetecting = false; updateEstimate();
+      if (!mp4Meta) srcFps = f;
+      fpsDetecting = false; updateEstimate();
     });
   });
 
@@ -592,10 +595,25 @@ if ('serviceWorker' in navigator) {
     loopPlay = false; $('loopBtn').textContent = '🔁 선택 구간 반복 재생';
     if (video.paused) video.play().catch(() => {}); else video.pause();
   };
+  // 구간 반복: 프레임 단위로 끝 지점을 확인 (timeupdate는 0.25초 간격이라 끝이 어긋남)
+  function watchLoop() {
+    if (!('requestVideoFrameCallback' in video)) return;
+    const cb = (now, md) => {
+      if (!loopPlay) return;
+      const fd = 1 / (srcFps || 30);
+      if (md.mediaTime >= end - 0.0005) { video.currentTime = start; }
+      else if (md.mediaTime + fd >= end - 0.0005) {
+        // 다음 프레임이 끝 지점을 넘으면, 지금 프레임을 다 보여 준 뒤 처음으로
+        setTimeout(() => { if (loopPlay) video.currentTime = start; }, fd * 1000 / (video.playbackRate || 1));
+      }
+      video.requestVideoFrameCallback(cb);
+    };
+    video.requestVideoFrameCallback(cb);
+  }
   $('loopBtn').onclick = () => {
     loopPlay = !loopPlay;
     $('loopBtn').textContent = loopPlay ? '⏹ 반복 재생 멈추기' : '🔁 선택 구간 반복 재생';
-    if (loopPlay) { video.currentTime = start; video.play().catch(() => {}); } else video.pause();
+    if (loopPlay) { video.currentTime = start; video.play().catch(() => {}); watchLoop(); } else video.pause();
   };
   video.addEventListener('play', () => $('playBtn').textContent = '⏸ 일시정지');
   video.addEventListener('pause', () => $('playBtn').textContent = '▶ 재생');
@@ -603,7 +621,7 @@ if ('serviceWorker' in navigator) {
     if (busy) return;
     $('curTime').textContent = fmt(video.currentTime);
     $('headBar').style.left = (video.currentTime / dur * 100) + '%';
-    if (loopPlay && video.currentTime >= end) video.currentTime = start;
+    if (loopPlay && !('requestVideoFrameCallback' in video) && video.currentTime >= end) video.currentTime = start;
   });
   $('track').addEventListener('click', e => {
     const r = e.currentTarget.getBoundingClientRect();
@@ -816,10 +834,10 @@ if ('serviceWorker' in navigator) {
       const onSeeked = () => {
         if ('requestVideoFrameCallback' in v) {
           v.requestVideoFrameCallback(() => fin());
-          to2 = setTimeout(fin, 250); // 같은 프레임이면 콜백이 안 올 수 있음
+          to2 = setTimeout(fin, 2000); // 같은 프레임이면 콜백이 안 올 수 있음
         } else requestAnimationFrame(() => requestAnimationFrame(fin));
       };
-      to = setTimeout(fin, 5000);
+      to = setTimeout(fin, 10000);
       v.addEventListener('seeked', onSeeked);
       v.currentTime = t;
     });
@@ -827,6 +845,193 @@ if ('serviceWorker' in navigator) {
   const toBlob = (c, q) => new Promise((res, rej) => c.toBlob(b => b ? res(b) : rej(new Error('인코딩 실패')), 'image/webp', q));
 
   $('cancelBtn').onclick = () => { cancelled = true; };
+
+  // ---- 정확한 프레임 추출 (MP4 직접 해독, WebCodecs) ----
+  // 영상 파일에서 프레임을 하나도 빠짐없이 순서대로 꺼내 씀. 지원되지 않으면 기존 방식(이동하며 찍기)으로 대신함.
+  let srcBlob = null, mp4Meta = null, metaPromise = null, metaToken = 0;
+  const COMMON_FPS = [10, 12, 15, 20, 23.976, 24, 25, 29.97, 30, 48, 50, 59.94, 60, 90, 120];
+  const snapFps = f => {
+    let best = null;
+    for (const c of COMMON_FPS) if (Math.abs(c - f) / c < 0.01 && (best === null || Math.abs(c - f) < Math.abs(best - f))) best = c;
+    return best !== null ? best : Math.round(f * 100) / 100;
+  };
+  function startMeta(blob) {
+    srcBlob = blob; mp4Meta = null;
+    const tok = ++metaToken;
+    metaPromise = loadMp4Meta(blob).catch(() => null).then(m => {
+      if (tok !== metaToken) return null;
+      mp4Meta = m;
+      if (m) { srcFps = snapFps(m.fps); updateEstimate(); }
+      return m;
+    });
+  }
+  async function loadMp4Meta(blob) {
+    if (typeof MP4Box === 'undefined' || typeof DataStream === 'undefined' || !('VideoDecoder' in window) || !('VideoFrame' in window)) return null;
+    const mp4 = MP4Box.createFile(); let info = null, err = null;
+    mp4.onReady = i => { info = i; }; mp4.onError = e => { err = e; };
+    let pos = 0, guard = 0;
+    while (!info && !err && pos < blob.size && guard++ < 400) {
+      const ab = await blob.slice(pos, pos + (1 << 20)).arrayBuffer();
+      ab.fileStart = pos;
+      const next = mp4.appendBuffer(ab);
+      pos = next > pos ? next : pos + ab.byteLength;
+    }
+    if (!info || !info.videoTracks || !info.videoTracks.length) return null;
+    const v = info.videoTracks[0];
+    const trak = mp4.getTrackById(v.id);
+    let desc;
+    for (const e of trak.mdia.minf.stbl.stsd.entries) {
+      const box = e.avcC || e.hvcC || e.vpcC || e.av1C;
+      if (box) { const ds = new DataStream(undefined, 0, DataStream.BIG_ENDIAN); box.write(ds); desc = new Uint8Array(ds.buffer, 8); break; }
+    }
+    const config = { codec: v.codec, codedWidth: v.video.width, codedHeight: v.video.height };
+    if (desc) config.description = desc;
+    const sup = await VideoDecoder.isConfigSupported(config).catch(() => ({ supported: false }));
+    if (!sup || !sup.supported) return null;
+    // 편집 목록(edit list) 보정: 재생기가 보여 주는 시간과 맞춤
+    let shift = 0;
+    try {
+      const ents = trak.edts && trak.edts.elst && trak.edts.elst.entries;
+      const movTs = mp4.moov.mvhd.timescale || 1000;
+      if (ents) for (const en of ents) {
+        if (en.media_time === -1) shift += en.segment_duration / movTs;
+        else { shift -= en.media_time / v.timescale; break; }
+      }
+    } catch (e) { shift = 0; }
+    const samples = trak.samples.map(x => ({ off: x.offset, size: x.size, cts: x.cts / x.timescale + shift, dur: x.duration / x.timescale, key: !!x.is_sync }));
+    if (samples.length < 2) return null;
+    const ctsSorted = samples.map(x => x.cts).sort((a, b) => a - b);
+    const span = ctsSorted[ctsSorted.length - 1] - ctsSorted[0];
+    const fps = span > 0 ? (samples.length - 1) / span : 30;
+    // 작은 영상은 크롬 재생기가 색 변환(BT.601/709)을 다르게 할 수 있어, 재생기 화면과 비교해 같은 색이 나오는 쪽을 고름
+    if (Math.min(v.video.width, v.video.height) < 720) {
+      try {
+        const k0 = samples.reduce((a, b) => (b.key && (!a || b.cts < a.cts)) ? b : a, null);
+        const data = new Uint8Array(await blob.slice(k0.off, k0.off + k0.size).arrayBuffer());
+        const S = 48;
+        const grab = src => { const c = document.createElement('canvas'); c.width = c.height = S; const x = c.getContext('2d', { willReadFrequently: true }); x.drawImage(src, 0, 0, S, S); return x.getImageData(0, 0, S, S).data; };
+        let rot0 = 0; const mm = v.matrix;
+        if (mm) { if (mm[0] === 0 && mm[1] > 0) rot0 = 90; else if (mm[0] < 0 && mm[1] === 0) rot0 = 180; else if (mm[0] === 0 && mm[1] < 0) rot0 = 270; }
+        const grabFrame = f => {
+          const c = document.createElement('canvas'); c.width = c.height = S; const x = c.getContext('2d', { willReadFrequently: true });
+          const sw = rot0 % 180 ? f.displayHeight : f.displayWidth, sh = rot0 % 180 ? f.displayWidth : f.displayHeight;
+          drawFrameCropped(x, f, rot0, { sx: 0, sy: 0, sw, sh }, S, S);
+          return x.getImageData(0, 0, S, S).data;
+        };
+        const decodeGrab = cfg => new Promise(res => {
+          let got = null;
+          const d = new VideoDecoder({ output: f => { if (!got) got = grabFrame(f); f.close(); }, error: () => res(null) });
+          d.configure(cfg);
+          d.decode(new EncodedVideoChunk({ type: 'key', timestamp: 0, data }));
+          d.flush().then(() => { try { d.close(); } catch (e) {} res(got); }, () => res(null));
+        });
+        const sd = Object.assign({}, config, { colorSpace: { primaries: 'smpte170m', transfer: 'smpte170m', matrix: 'smpte170m', fullRange: false } });
+        const [pA, pB] = [await decodeGrab(config), await decodeGrab(sd)];
+        const u = URL.createObjectURL(blob), rv = hiddenVideo(u);
+        try {
+          await new Promise((res, rej) => { if (rv.readyState >= 2) return res(); rv.addEventListener('loadeddata', res, { once: true }); rv.addEventListener('error', rej, { once: true }); setTimeout(rej, 8000); });
+          await seekTo(rv, Math.max(0, k0.cts) + 0.001);
+          const ref = grab(rv);
+          const diff = a => { let t = 0; for (let q = 0; q < ref.length; q += 4) t += Math.abs(a[q] - ref[q]) + Math.abs(a[q + 1] - ref[q + 1]) + Math.abs(a[q + 2] - ref[q + 2]); return t; };
+          if (pA && pB && diff(pB) < diff(pA)) config.colorSpace = sd.colorSpace;
+        } finally { dropVideo(rv); URL.revokeObjectURL(u); }
+      } catch (e) {}
+    }
+    // 회전 정보 (휴대폰 촬영 영상)
+    let rot = 0; const m = v.matrix;
+    if (m) { const a = m[0], b = m[1]; if (a === 0 && b > 0) rot = 90; else if (a < 0 && b === 0) rot = 180; else if (a === 0 && b < 0) rot = 270; }
+    return { config, samples, fps, rot };
+  }
+  // 해독된 프레임을 화면 기준(회전 반영)으로 자르기 영역에 맞춰 그림
+  function drawFrameCropped(ctx, frame, rot, r, w, h) {
+    const fw = frame.displayWidth, fh = frame.displayHeight;
+    ctx.setTransform(w / r.sw, 0, 0, h / r.sh, -r.sx * w / r.sw, -r.sy * h / r.sh);
+    if (rot === 90) { ctx.translate(fh, 0); ctx.rotate(Math.PI / 2); }
+    else if (rot === 180) { ctx.translate(fw, fh); ctx.rotate(Math.PI); }
+    else if (rot === 270) { ctx.translate(0, fw); ctx.rotate(-Math.PI / 2); }
+    ctx.drawImage(frame, 0, 0, fw, fh);
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+  }
+  async function convertExact(meta, o, w, h, ctx, canvas, fpsOut, onProg) {
+    const S = meta.samples, t0 = start, t1 = end, eps = 1e-4;
+    const allMode = !(o.fps > 0 && o.fps < meta.fps - 0.01);
+    const step = o.speed / fpsOut, per = 1000 / fpsOut;
+    const r = cropPx();
+    // 시작점 이전의 가장 가까운 키프레임부터 해독
+    let k = 0;
+    for (let i = 0; i < S.length; i++) if (S[i].key && S[i].cts <= t0 + eps) k = i;
+    const frames = [], queue = [];
+    let held = null, finished = false, decErr = null, wake = null;
+    const poke = () => { if (wake) { const f = wake; wake = null; f(); } };
+    const waitPoke = () => new Promise(res => { wake = res; setTimeout(res, 50); });
+    const dec = new VideoDecoder({
+      output: f => { queue.push(f); poke(); },
+      error: e => { decErr = e; poke(); }
+    });
+    dec.configure(meta.config);
+    let outMs = 0; // 지금까지 만든 결과 재생 시간
+    async function emit(f, a, b) {
+      const bRaw = b;
+      a = Math.max(a, t0); b = Math.min(b, t1);
+      if (b <= a + 1e-6) return;
+      let d;
+      if (allMode) {
+        // 끝 지점에 걸친 마지막 프레임도 원래 길이만큼 보여 줌
+        d = Math.round((bRaw - t0) / o.speed * 1000) - Math.round(outMs);
+        if (d < 1) return;
+      } else {
+        const ks = Math.ceil((a - t0) / step - 1e-6), ke = Math.ceil((b - t0) / step - 1e-6);
+        if (ke <= ks) return;
+        d = Math.round(ke * per) - Math.round(outMs);
+        if (d < 1) return;
+      }
+      outMs += d;
+      drawFrameCropped(ctx, f, meta.rot, r, w, h);
+      const blob = await toBlob(canvas, o.q);
+      const fr = parseFrame(await blob.arrayBuffer());
+      fr.dur = d; frames.push(fr);
+      onProg(frames.length);
+    }
+    async function handle(f) {
+      const ts = f.timestamp / 1e6;
+      if (held) {
+        const hts = held.timestamp / 1e6;
+        if (hts < t1) await emit(held, hts, ts);
+        held.close();
+      }
+      held = f;
+      if (ts >= t1 - eps) finished = true;
+    }
+    try {
+      let i = k;
+      while (!finished) {
+        if (cancelled) throw new Error('cancel');
+        if (decErr) throw decErr;
+        // 해독된 프레임 처리
+        while (queue.length && !finished) await handle(queue.shift());
+        if (finished) break;
+        if (i < S.length) {
+          if (dec.decodeQueueSize > 3 || queue.length > 3) { await waitPoke(); continue; }
+          const sm = S[i++];
+          const data = new Uint8Array(await srcBlob.slice(sm.off, sm.off + sm.size).arrayBuffer());
+          dec.decode(new EncodedVideoChunk({ type: sm.key ? 'key' : 'delta', timestamp: Math.round(sm.cts * 1e6), duration: Math.round(sm.dur * 1e6), data }));
+        } else {
+          await dec.flush();
+          while (queue.length && !finished) await handle(queue.shift());
+          break;
+        }
+      }
+      if (held) {
+        const hts = held.timestamp / 1e6;
+        if (hts < t1) await emit(held, hts, hts + (held.duration ? held.duration / 1e6 : 1 / meta.fps));
+      }
+    } finally {
+      if (held) { try { held.close(); } catch (e) {} }
+      queue.forEach(f => { try { f.close(); } catch (e) {} });
+      try { dec.close(); } catch (e) {}
+    }
+    return frames;
+  }
 
   $('convertBtn').onclick = async () => {
     if (busy || !dur) return;
@@ -844,18 +1049,33 @@ if ('serviceWorker' in navigator) {
     ctx.imageSmoothingQuality = 'high';
 
     // 변환 전용 비디오 (미리보기와 분리)
-    const pv = hiddenVideo(srcURL);
+    let pv = null;
     try {
+      if (metaPromise) { $('progTxt').textContent = '영상 분석 중…'; await metaPromise; }
+      let frames = [], exactOK = false, merged = 0;
+      if (mp4Meta) {
+        try {
+          frames = await convertExact(mp4Meta, o, w, h, ctx, canvas, fpsOut, k => {
+            $('bar').style.width = Math.min(95, k / n * 95) + '%';
+            $('progTxt').textContent = `프레임 처리 중… ${k} / 약 ${n}`;
+          });
+          exactOK = frames.length > 0;
+        } catch (e) {
+          if (e && e.message === 'cancel') throw e;
+          frames = [];
+        }
+      }
+      if (!exactOK) {
+      pv = hiddenVideo(srcURL);
       await new Promise((res, rej) => {
         if (pv.readyState >= 2) return res();
         pv.addEventListener('loadeddata', res, { once: true });
         pv.addEventListener('error', () => rej(new Error('동영상을 열 수 없습니다')), { once: true });
       });
-      const frames = [];
       const step = o.speed / fpsOut;
       const per = 1000 / fpsOut;
       const durOf = i => Math.round((i + 1) * per) - Math.round(i * per);
-      let prevSig = null, merged = 0;
+      let prevSig = null;
       for (let i = 0; i < n; i++) {
         if (cancelled) throw new Error('cancel');
         // 프레임 경계가 아니라 프레임 한가운데 시점을 잡아 반올림 오차로 같은 프레임이 두 번 잡히지 않게 함
@@ -877,6 +1097,7 @@ if ('serviceWorker' in navigator) {
         $('bar').style.width = (p * 95) + '%';
         $('progTxt').textContent = `프레임 처리 중… ${i + 1} / ${n}`;
       }
+      }
       let seq = frames;
       if (o.boomerang && frames.length > 2) seq = frames.concat(frames.slice(1, -1).reverse());
       const durations = seq.map(f => f.dur);
@@ -886,7 +1107,7 @@ if ('serviceWorker' in navigator) {
       if (outURL) URL.revokeObjectURL(outURL);
       outURL = URL.createObjectURL(outBlob);
       $('outImg').src = outURL;
-      $('outInfo').textContent = `${w}×${h} · ${(+fpsOut.toFixed(2))}fps · 프레임 ${seq.length}개 · ${(outBlob.size / 1048576).toFixed(2)}MB` + (merged ? ` · 중복 ${merged}개 합침` : '');
+      $('outInfo').textContent = `${w}×${h} · ${(+fpsOut.toFixed(2))}fps · 프레임 ${seq.length}개 · ${(outBlob.size / 1048576).toFixed(2)}MB` + (merged ? ` · 중복 ${merged}개 합침` : '') + (exactOK ? ' · 정밀 모드' : '');
       $('result').classList.remove('hidden');
       $('saveHint').textContent = '';
       setTimeout(() => $('result').scrollIntoView({ behavior: 'smooth', block: 'start' }), 50);
@@ -895,7 +1116,7 @@ if ('serviceWorker' in navigator) {
       if (err.message === 'cancel') { $('progTxt').textContent = '취소했습니다.'; }
       else { $('progTxt').innerHTML = '<span class="err">오류: ' + err.message + '</span>'; }
     } finally {
-      dropVideo(pv);
+      if (pv) dropVideo(pv);
       busy = false; $('convertBtn').disabled = false;
       setTimeout(() => { if (!busy) $('progressWrap').classList.add('hidden'); }, 2500);
     }

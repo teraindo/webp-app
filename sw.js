@@ -1,6 +1,6 @@
 // 앱 화면을 저장해 두어 오프라인에서도 열리게 함. 새 버전이 있으면 온라인일 때 자동으로 받아옴.
-const CACHE = 'webp-app-v4';
-const SHELL = ['./', './index.html', './manifest.webmanifest', './icon-192.png', './icon-512.png', './icon-maskable-512.png', './apple-touch-icon.png'];
+const CACHE = 'webp-app-v5';
+const SHELL = ['./', './index.html', './manifest.webmanifest', './icon-192.png', './icon-512.png', './icon-maskable-512.png', './apple-touch-icon.png', './mp4box.all.min.js'];
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL)).then(() => self.skipWaiting()));
 });
